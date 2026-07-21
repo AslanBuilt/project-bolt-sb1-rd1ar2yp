@@ -9,6 +9,14 @@ Personal single-user wardrobe app: Vite + React + TypeScript, backed by Supabase
 - **Database**: Supabase project `supabase-red-xylophone` (ref `hrprbiregnrbrdnhetht`), provisioned through the Vercel Marketplace Supabase integration — not a standalone Supabase project. This *replaced* an earlier standalone Supabase project (ref `bhxiwpztitzgzslzxkiz`); that old project's data was not migrated over, only the schema (via the migration files in `supabase/migrations/`).
 - **Edge Functions**: `ai-tag-item`, `analyze-inspiration`, `outfit-recommend` under `supabase/functions/` run on Supabase's infrastructure, deployed separately from the Vercel frontend build.
 
+## Known limitation: Gemini free-tier rate limit
+
+The `GEMINI_API_KEY` currently in use is on Google's **free tier**, which caps `gemini-2.5-flash` at **5 requests/minute per project** — shared across all 3 Edge Functions, since they all call the same model. Uploading several inspiration photos in one batch (or using multiple AI features close together) can exhaust this in seconds; Google returns `429 RESOURCE_EXHAUSTED` with a `retryDelay`.
+
+- `ai-tag-item` and `analyze-inspiration` propagate this as `429` + `retryAfter` (seconds) to the frontend instead of a generic 500. `InspirationPage.tsx` waits that long and retries once before giving up.
+- `outfit-recommend` already falls back to a rule-based recommendation on any Gemini failure, so it needed no change.
+- This makes normal usage resilient to brief rate limiting, but does **not** raise the actual 5/min ceiling. The real fix is enabling billing on the Gemini key's Google Cloud project (or swapping in a paid-tier key) — set the new key via `supabase secrets set GEMINI_API_KEY=... --project-ref hrprbiregnrbrdnhetht`.
+
 ## Environment variables and secrets
 
 Two separate stores, because two separate platforms execute this code:
