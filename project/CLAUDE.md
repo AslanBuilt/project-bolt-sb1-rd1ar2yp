@@ -9,6 +9,10 @@ Personal single-user wardrobe app: Vite + React + TypeScript, backed by Supabase
 - **Database**: Supabase project `supabase-red-xylophone` (ref `hrprbiregnrbrdnhetht`), provisioned through the Vercel Marketplace Supabase integration — not a standalone Supabase project. This *replaced* an earlier standalone Supabase project (ref `bhxiwpztitzgzslzxkiz`); that old project's data was not migrated over, only the schema (via the migration files in `supabase/migrations/`).
 - **Edge Functions**: `ai-tag-item`, `analyze-inspiration`, `outfit-recommend` under `supabase/functions/` run on Supabase's infrastructure, deployed separately from the Vercel frontend build.
 
+## Edge Functions require the anon key as a Bearer token
+
+All 3 Edge Functions are deployed with `verify_jwt: true` (the Supabase default) — every `fetch()` call to them from the frontend **must** include `Authorization: Bearer ${VITE_SUPABASE_ANON_KEY}`, or Supabase rejects the request with `401` before it ever reaches the function code. `TodayPage.tsx` did this correctly from the start; `InspirationPage.tsx` and `AddItemPage.tsx` originally didn't, which silently broke AI inspiration analysis and AI auto-tagging entirely (they weren't hitting a real Gemini rate limit at all — every request was being rejected at the auth layer). Fixed 2026-07-21. If a new Edge Function call site is ever added, make sure it includes this header.
+
 ## Known limitation: Gemini free-tier rate limit
 
 The `GEMINI_API_KEY` currently in use is on Google's **free tier**, which caps `gemini-2.5-flash` at **5 requests/minute per project** — shared across all 3 Edge Functions, since they all call the same model. Uploading several inspiration photos in one batch (or using multiple AI features close together) can exhaust this in seconds; Google returns `429 RESOURCE_EXHAUSTED` with a `retryDelay`.
