@@ -131,6 +131,16 @@ Guidelines:
     if (!response.ok) {
       const error = await response.text();
       console.error('Gemini API error:', error);
+
+      if (response.status === 429) {
+        const retryMatch = error.match(/retry in (\d+(?:\.\d+)?)s/i);
+        const retryAfter = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) : 15;
+        return new Response(
+          JSON.stringify({ error: "Rate limited", retryAfter }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json", "Retry-After": String(retryAfter) } }
+        );
+      }
+
       return new Response(
         JSON.stringify({ error: "Failed to analyze image" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

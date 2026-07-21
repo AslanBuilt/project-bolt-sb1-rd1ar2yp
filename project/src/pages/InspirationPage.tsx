@@ -29,6 +29,43 @@ function colorNameToHex(name: string): string {
   return COLOR_HEX_MAP[name.toLowerCase()] || '#9ca3af';
 }
 
+interface AnalysisResult {
+  colorPalette: string[];
+  silhouette: string;
+  patternTrends: string[];
+}
+
+async function analyzeInspirationImage(base64: string): Promise<{ analysis?: AnalysisResult; error?: string; detail?: string }> {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await fetch(`${supabaseUrl}/functions/v1/analyze-inspiration`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageBase64: base64 }),
+    });
+
+    if (response.status === 429) {
+      const { retryAfter } = await response.json().catch(() => ({ retryAfter: 15 }));
+      if (attempt === 0) {
+        // Gemini free-tier rate limit hit - wait out the window it told us, then try once more
+        await new Promise(resolve => setTimeout(resolve, (retryAfter || 15) * 1000));
+        continue;
+      }
+      return { error: 'Rate limited', detail: 'Still rate limited after waiting - try again in a minute.' };
+    }
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => 'unreadable');
+      return { error: `HTTP ${response.status}`, detail: errBody.substring(0, 300) };
+    }
+
+    return response.json();
+  }
+
+  return { error: 'Rate limited' };
+}
+
 export function InspirationPage() {
   const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -133,31 +170,19 @@ export function InspirationPage() {
         });
         const base64 = await base64Promise;
 
-        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-        const analysisResponse = await fetch(`${supabaseUrl}/functions/v1/analyze-inspiration`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64: base64 }),
-        });
-
-        if (analysisResponse.ok) {
-          const { analysis, error, detail } = await analysisResponse.json();
-          if (analysis) {
-            await supabase
-              .from('inspiration_images')
-              .update({
-                color_palette: analysis.colorPalette || [],
-                silhouette: analysis.silhouette || '',
-                pattern_trends: analysis.patternTrends || [],
-                analyzed: true,
-              })
-              .eq('id', id);
-          } else if (error) {
-            console.error(`analyze-inspiration error for ${file.name}:`, error, detail || '');
-          }
-        } else {
-          const errBody = await analysisResponse.text().catch(() => 'unreadable');
-          console.error(`analyze-inspiration HTTP ${analysisResponse.status} for ${file.name}:`, errBody.substring(0, 300));
+        const { analysis, error, detail } = await analyzeInspirationImage(base64);
+        if (analysis) {
+          await supabase
+            .from('inspiration_images')
+            .update({
+              color_palette: analysis.colorPalette || [],
+              silhouette: analysis.silhouette || '',
+              pattern_trends: analysis.patternTrends || [],
+              analyzed: true,
+            })
+            .eq('id', id);
+        } else if (error) {
+          console.error(`analyze-inspiration error for ${file.name}:`, error, detail || '');
         }
 
         setUploadProgress(prev => prev.map((p, idx) => idx === i ? { ...p, status: 'done' } : p));
@@ -231,31 +256,19 @@ export function InspirationPage() {
         reader.onload = () => resolve(reader.result as string);
         reader.readAsDataURL(blob);
       });
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      const analysisResponse = await fetch(`${supabaseUrl}/functions/v1/analyze-inspiration`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64 }),
-      });
-      if (analysisResponse.ok) {
-        const { analysis, error, detail } = await analysisResponse.json();
-        if (analysis) {
-          await supabase.from('inspiration_images').update({
-            color_palette: analysis.colorPalette || [],
-            silhouette: analysis.silhouette || '',
-            pattern_trends: analysis.patternTrends || [],
-            analyzed: true,
-          }).eq('id', img.id);
-          await fetchImages();
-          setSelectedImage(null);
-        } else {
-          console.error(`retry analyze-inspiration error for ${img.id}:`, error, detail || '');
-          alert('Analysis failed again - it may still be an API limit. Try again in a bit.');
-        }
+      const { analysis, error, detail } = await analyzeInspirationImage(base64);
+      if (analysis) {
+        await supabase.from('inspiration_images').update({
+          color_palette: analysis.colorPalette || [],
+          silhouette: analysis.silhouette || '',
+          pattern_trends: analysis.patternTrends || [],
+          analyzed: true,
+        }).eq('id', img.id);
+        await fetchImages();
+        setSelectedImage(null);
       } else {
-        const errBody = await analysisResponse.text().catch(() => 'unreadable');
-        console.error(`retry analyze-inspiration HTTP ${analysisResponse.status}:`, errBody.substring(0, 300));
-        alert('Analysis failed. It may be a temporary API limit - try again in a bit.');
+        console.error(`retry analyze-inspiration error for ${img.id}:`, error, detail || '');
+        alert('Still rate limited by the AI service - it already waited and retried once. Try again in a minute.');
       }
     } catch (err) {
       console.error('Retry analysis error:', err);
