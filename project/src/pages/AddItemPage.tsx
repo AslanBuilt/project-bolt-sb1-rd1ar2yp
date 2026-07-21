@@ -100,9 +100,10 @@ export function AddItemPage() {
       const base64 = await base64Promise;
 
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
       const response = await fetch(`${supabaseUrl}/functions/v1/ai-tag-item`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
         body: JSON.stringify({ imageBase64: base64 }),
       });
 

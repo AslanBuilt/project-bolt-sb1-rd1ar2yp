@@ -37,11 +37,12 @@ interface AnalysisResult {
 
 async function analyzeInspirationImage(base64: string): Promise<{ analysis?: AnalysisResult; error?: string; detail?: string }> {
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const response = await fetch(`${supabaseUrl}/functions/v1/analyze-inspiration`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
       body: JSON.stringify({ imageBase64: base64 }),
     });
 
