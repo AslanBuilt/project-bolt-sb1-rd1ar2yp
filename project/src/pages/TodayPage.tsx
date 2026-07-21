@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { getSignedUrls } from '../lib/storage';
+import { getSignedUrl, getSignedUrls } from '../lib/storage';
 import { ClothingItem, Outfit } from '../types';
 import {
   filterAndScoreItems,
@@ -52,6 +52,9 @@ export function TodayPage() {
   const [aiSource, setAiSource] = useState<'idle' | 'ai' | 'rule-based'>('idle');
   const [pastOutfitCombos, setPastOutfitCombos] = useState<Map<string, { timesWorn: number; lastWorn: string }>>(new Map());
   const [suggestedRatings, setSuggestedRatings] = useState<Map<string, 'up' | 'down'>>(new Map());
+  const [basePhotoUrl, setBasePhotoUrl] = useState<string | null>(null);
+  const [tryOnStatus, setTryOnStatus] = useState<'idle' | 'generating' | 'done' | 'failed'>('idle');
+  const [tryOnImageUrl, setTryOnImageUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -77,7 +80,7 @@ export function TodayPage() {
   const fetchData = async () => {
     setLoading(true);
 
-    const [itemsResult, todayOutfitsResult] = await Promise.all([
+    const [itemsResult, todayOutfitsResult, prefsResult] = await Promise.all([
       supabase
         .from('clothing_items')
         .select('*')
@@ -90,9 +93,14 @@ export function TodayPage() {
         .eq('worn', true)
         .order('created_at', { ascending: false })
         .limit(1),
+      supabase.from('style_preferences').select('base_photo_url').eq('user_id', user!.id).maybeSingle(),
     ]);
 
     if (itemsResult.data) setItems(itemsResult.data);
+    if (prefsResult.data?.base_photo_url) {
+      const signedUrl = await getSignedUrl(prefsResult.data.base_photo_url);
+      setBasePhotoUrl(signedUrl);
+    }
 
     // Fetch all past worn outfits to build combo lookup
     const { data: allOutfits } = await supabase
@@ -144,6 +152,12 @@ export function TodayPage() {
         .select('*')
         .in('id', outfit.item_ids || []);
       setSavedOutfit({ ...outfit, items: outfitItems || [] });
+
+      if (outfit.generated_image_url) {
+        const signedUrl = await getSignedUrl(outfit.generated_image_url);
+        setTryOnImageUrl(signedUrl);
+        setTryOnStatus('done');
+      }
     }
 
     setLoading(false);
@@ -368,6 +382,66 @@ export function TodayPage() {
     setGenerating(false);
   };
 
+  const generateTryOn = async (outfitId: string, outfitItems: ClothingItem[]) => {
+    if (!basePhotoUrl) return;
+
+    setTryOnStatus('generating');
+    setTryOnImageUrl(null);
+
+    try {
+      // CatVTON/IDM-VTON take one garment per body region per call. If both a
+      // base layer (shirts) and an outer layer (sweatshirt_jacket) are present,
+      // only the visible outer layer is sent for the "upper" step.
+      const upperItem =
+        outfitItems.find(i => i.category === 'sweatshirt_jacket') ||
+        outfitItems.find(i => i.category === 'shirts');
+      const lowerItem = outfitItems.find(i => i.category === 'pants' || i.category === 'shorts');
+
+      const stepItems = [upperItem, lowerItem].filter((i): i is ClothingItem => Boolean(i));
+      if (stepItems.length === 0) {
+        setTryOnStatus('failed');
+        return;
+      }
+
+      const photoPaths = stepItems.map(i => i.photo_url);
+      const urlMap = await getSignedUrls(photoPaths);
+
+      const steps = stepItems.map(i => ({
+        category: i.category === 'sweatshirt_jacket' || i.category === 'shirts' ? 'upper' : 'lower',
+        photoUrl: urlMap.get(i.photo_url) || i.photo_url,
+      }));
+
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      const response = await fetch(`${supabaseUrl}/functions/v1/outfit-tryon`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
+        body: JSON.stringify({ userId: user!.id, outfitId, basePhotoUrl, steps }),
+      });
+
+      if (!response.ok) {
+        console.error('outfit-tryon HTTP error:', response.status, await response.text().catch(() => ''));
+        setTryOnStatus('failed');
+        return;
+      }
+
+      const result = await response.json();
+      if (!result.success || !result.path) {
+        console.error('outfit-tryon failed:', result.error, 'failedStep:', result.failedStep);
+        setTryOnStatus('failed');
+        return;
+      }
+
+      await supabase.from('outfits').update({ generated_image_url: result.path }).eq('id', outfitId);
+      const signedUrl = await getSignedUrl(result.path);
+      setTryOnImageUrl(signedUrl);
+      setTryOnStatus('done');
+    } catch (err) {
+      console.error('generateTryOn error:', err);
+      setTryOnStatus('failed');
+    }
+  };
+
   const wearOutfit = async (outfit: GeneratedOutfit) => {
     if (!user) return;
 
@@ -387,6 +461,10 @@ export function TodayPage() {
     if (error) {
       console.error('Error saving outfit:', error);
       return;
+    }
+
+    if (basePhotoUrl) {
+      generateTryOn(data.id, outfit.items);
     }
 
     setSavedOutfit({ ...data, items: outfit.items });
@@ -542,6 +620,19 @@ export function TodayPage() {
               )}
             </div>
           </div>
+
+          {tryOnStatus === 'generating' && (
+            <div className="flex items-center justify-center gap-2 bg-white rounded-lg py-6 mb-3 text-sm text-slate-500">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Generating your look…
+            </div>
+          )}
+
+          {tryOnStatus === 'done' && tryOnImageUrl && (
+            <div className="rounded-lg overflow-hidden bg-slate-100 mb-3 aspect-[3/4] max-h-96">
+              <img src={tryOnImageUrl} alt="Today's outfit on you" className="w-full h-full object-contain" />
+            </div>
+          )}
 
           {savedOutfit.items && savedOutfit.items.length > 0 && (
             <div className="flex gap-2 overflow-x-auto pb-1 mb-3">

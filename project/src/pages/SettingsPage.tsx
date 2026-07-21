@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { STYLE_TAGS } from '../types';
-import { Check, Loader2, Palette, Trash2 } from 'lucide-react';
+import { getSignedUrl, uploadBasePhoto } from '../lib/storage';
+import { Check, Loader2, Palette, Trash2, User, Upload } from 'lucide-react';
 
 const FORMALITY_LEVELS = [
   { value: 'casual', label: 'Casual' },
@@ -14,6 +15,7 @@ interface StylePreferences {
   style_tags: string[];
   formality_range_min: string;
   formality_range_max: string;
+  base_photo_url?: string;
 }
 
 export function SettingsPage() {
@@ -28,6 +30,9 @@ export function SettingsPage() {
   const [itemCount, setItemCount] = useState(0);
   const [outfitCount, setOutfitCount] = useState(0);
       const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
+  const [basePhotoPreviewUrl, setBasePhotoPreviewUrl] = useState<string | null>(null);
+  const [uploadingBasePhoto, setUploadingBasePhoto] = useState(false);
+  const basePhotoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (user) {
@@ -49,13 +54,43 @@ export function SettingsPage() {
         style_tags: prefsResult.data.style_tags || [],
         formality_range_min: prefsResult.data.formality_range_min || 'casual',
         formality_range_max: prefsResult.data.formality_range_max || 'smart-casual',
+        base_photo_url: prefsResult.data.base_photo_url || undefined,
       });
+
+      if (prefsResult.data.base_photo_url) {
+        const signedUrl = await getSignedUrl(prefsResult.data.base_photo_url);
+        setBasePhotoPreviewUrl(signedUrl);
+      }
     }
 
     if (itemsResult.count !== null) setItemCount(itemsResult.count);
     if (outfitsResult.count !== null) setOutfitCount(outfitsResult.count);
 
     setLoading(false);
+  };
+
+  const handleBasePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+
+    setUploadingBasePhoto(true);
+    try {
+      const path = await uploadBasePhoto(file, user.id);
+      await supabase.from('style_preferences').upsert({
+        user_id: user.id,
+        base_photo_url: path,
+      }, { onConflict: 'user_id' });
+
+      setPreferences((prev) => ({ ...prev, base_photo_url: path }));
+      const signedUrl = await getSignedUrl(path);
+      setBasePhotoPreviewUrl(signedUrl);
+    } catch (err) {
+      console.error('Error uploading base photo:', err);
+      alert('Failed to upload photo. Please try again.');
+    } finally {
+      setUploadingBasePhoto(false);
+      if (basePhotoInputRef.current) basePhotoInputRef.current.value = '';
+    }
   };
 
   const toggleTag = (tag: string) => {
@@ -124,6 +159,49 @@ export function SettingsPage() {
           <div>
             <p className="font-medium text-slate-900">Aiden</p>
             <p className="text-sm text-slate-500">Personal closet</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Try-On Base Photo */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
+        <div className="flex items-center gap-2 mb-3">
+          <User className="w-5 h-5 text-slate-400" />
+          <h3 className="font-medium text-slate-900">Outfit Try-On Photo</h3>
+        </div>
+        <p className="text-sm text-slate-500 mb-3">
+          A front-facing, full-body photo on a plain background. Used to visualize each day's recommended outfit on you.
+        </p>
+
+        <div className="flex items-center gap-3">
+          <div className="w-20 h-28 rounded-lg overflow-hidden bg-slate-100 border border-slate-200 flex-shrink-0 flex items-center justify-center">
+            {basePhotoPreviewUrl ? (
+              <img src={basePhotoPreviewUrl} alt="Try-on base" className="w-full h-full object-cover" />
+            ) : (
+              <User className="w-8 h-8 text-slate-300" />
+            )}
+          </div>
+
+          <div className="flex-1">
+            <input
+              ref={basePhotoInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleBasePhotoSelect}
+            />
+            <button
+              onClick={() => basePhotoInputRef.current?.click()}
+              disabled={uploadingBasePhoto}
+              className="w-full flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 text-slate-700 font-medium py-2 rounded-lg text-sm transition-colors"
+            >
+              {uploadingBasePhoto ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4" />
+              )}
+              {preferences.base_photo_url ? 'Replace photo' : 'Upload photo'}
+            </button>
           </div>
         </div>
       </div>

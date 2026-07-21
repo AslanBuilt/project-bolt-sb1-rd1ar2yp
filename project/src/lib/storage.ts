@@ -112,6 +112,29 @@ function extractPathFromUrl(urlOrPath: string): string {
 }
 
 /**
+ * Upload the user's try-on base photo (front-facing, full body, plain background).
+ * Stored under the user's own folder in the same private bucket as clothing photos,
+ * so the existing storage.objects RLS policies (path-scoped to auth.uid()) already cover it.
+ */
+export async function uploadBasePhoto(file: File, userId: string): Promise<string> {
+  const ext = file.name.split('.').pop() || 'jpg';
+  const path = `${userId}/profile/base-photo.${ext}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .upload(path, file, {
+      cacheControl: '3600',
+      upsert: true,
+    });
+
+  if (uploadError) {
+    throw uploadError;
+  }
+
+  return path;
+}
+
+/**
  * Upload an inspiration photo to the user's folder in storage
  * Returns the storage path (not a full URL) to be stored in the database
  */

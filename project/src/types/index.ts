@@ -27,6 +27,7 @@ export interface StylePreferences {
   user_id: string;
   style_tags: string[];
   inspiration_photos?: string[];
+  base_photo_url?: string;
   formality_range: {
     min: Formality;
     max: Formality;
@@ -59,6 +60,7 @@ export interface Outfit {
   activity_text?: string;
   worn: boolean;
   rating?: 'up' | 'down';
+  generated_image_url?: string;
   created_at: string;
 }
 
