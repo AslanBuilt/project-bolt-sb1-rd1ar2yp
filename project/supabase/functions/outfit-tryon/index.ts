@@ -20,7 +20,7 @@ interface StepInput {
 
 interface TryOnRequest {
   userId: string;
-  outfitId: string;
+  comboKey: string;
   basePhotoUrl: string;
   steps: StepInput[];
 }
@@ -139,14 +139,48 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { userId, outfitId, basePhotoUrl, steps } = (await req.json()) as TryOnRequest;
+    const { userId, comboKey, basePhotoUrl, steps } = (await req.json()) as TryOnRequest;
 
-    if (!userId || !outfitId || !basePhotoUrl || !Array.isArray(steps)) {
+    if (!userId || !comboKey || !basePhotoUrl || !Array.isArray(steps)) {
       return json({ success: false, error: "Missing required fields" }, 400);
+    }
+
+    // Service-role client so the final result is written durably here,
+    // server-side, regardless of whether the browser that triggered this
+    // is still connected by the time generation finishes.
+    const supabaseAdmin = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+
+    async function markResult(patch: {
+      status: "done" | "failed";
+      image_url?: string;
+      failed_step?: string | null;
+      skipped?: string[];
+    }) {
+      const { error } = await supabaseAdmin
+        .from("tryon_results")
+        .upsert(
+          {
+            user_id: userId,
+            combo_key: comboKey,
+            status: patch.status,
+            image_url: patch.image_url ?? null,
+            failed_step: patch.failed_step ?? null,
+            skipped: patch.skipped ?? [],
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "user_id,combo_key" }
+        );
+      if (error) {
+        console.error(`outfit-tryon[${comboKey}] failed to write tryon_results:`, error);
+      }
     }
 
     const hfToken = Deno.env.get("HF_TOKEN");
     if (!hfToken) {
+      await markResult({ status: "failed", failed_step: null });
       return json({ success: false, error: "HF_TOKEN not configured" }, 500);
     }
 
@@ -156,17 +190,18 @@ Deno.serve(async (req: Request) => {
     const skipped = steps.filter((s) => !isSupportedCategory(s.category)).map((s) => s.category);
 
     if (skipped.length > 0) {
-      console.log(`outfit-tryon: skipping unsupported categories for outfit ${outfitId}:`, skipped);
+      console.log(`outfit-tryon[${comboKey}] skipping unsupported categories:`, skipped);
     }
 
     if (supportedSteps.length === 0) {
+      await markResult({ status: "failed", failed_step: null, skipped });
       return json(
         { success: false, error: "No supported garment categories (upper/lower) in this outfit", skipped },
         200
       );
     }
 
-    const logPrefixBase = `outfit-tryon[${outfitId}]`;
+    const logPrefixBase = `outfit-tryon[${comboKey}]`;
     console.log(`${logPrefixBase} basePhotoUrl=${basePhotoUrl}`);
     console.log(`${logPrefixBase} steps received:`, JSON.stringify(steps));
 
@@ -176,6 +211,7 @@ Deno.serve(async (req: Request) => {
       console.log(`${logPrefixBase} base photo fetched: ${currentImageBlob.size} bytes`);
     } catch (err) {
       console.error(`${logPrefixBase} failed to fetch base photo:`, err);
+      await markResult({ status: "failed", failed_step: null, skipped });
       return json({ success: false, error: "Could not load base photo", skipped }, 200);
     }
 
@@ -217,15 +253,11 @@ Deno.serve(async (req: Request) => {
     }
 
     if (stepsCompleted.length === 0) {
+      await markResult({ status: "failed", failed_step: failedStep, skipped });
       return json({ success: false, error: "Try-on generation failed", failedStep, skipped }, 200);
     }
 
-    const supabaseAdmin = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
-
-    const path = `${userId}/generated/${outfitId}.jpg`;
+    const path = `${userId}/generated/${comboKey}.jpg`;
     const arrayBuffer = await currentImageBlob.arrayBuffer();
     const { error: uploadError } = await supabaseAdmin.storage
       .from("clothing-photos")
@@ -233,10 +265,15 @@ Deno.serve(async (req: Request) => {
 
     if (uploadError) {
       console.error(`${logPrefixBase} storage upload failed:`, uploadError);
+      await markResult({ status: "failed", failed_step: failedStep, skipped });
       return json({ success: false, error: "Failed to store generated image", stepsCompleted, skipped }, 200);
     }
 
     console.log(`${logPrefixBase} success: path=${path} stepsCompleted=${stepsCompleted.join(",")} modelUsed=${modelUsed}`);
+
+    // A partial result (e.g. upper succeeded, lower failed) is still marked "done" —
+    // a partially-dressed visualization is better than none, matching the fallback philosophy.
+    await markResult({ status: "done", image_url: path, failed_step: failedStep, skipped });
 
     return json(
       {

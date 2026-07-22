@@ -53,8 +53,7 @@ export function TodayPage() {
   const [pastOutfitCombos, setPastOutfitCombos] = useState<Map<string, { timesWorn: number; lastWorn: string }>>(new Map());
   const [suggestedRatings, setSuggestedRatings] = useState<Map<string, 'up' | 'down'>>(new Map());
   const [basePhotoUrl, setBasePhotoUrl] = useState<string | null>(null);
-  const [tryOnStatus, setTryOnStatus] = useState<'idle' | 'generating' | 'done' | 'failed'>('idle');
-  const [tryOnImageUrl, setTryOnImageUrl] = useState<string | null>(null);
+  const [tryOnResults, setTryOnResults] = useState<Map<string, { status: 'generating' | 'done' | 'failed'; imageUrl?: string }>>(new Map());
 
   useEffect(() => {
     if (user) {
@@ -152,12 +151,6 @@ export function TodayPage() {
         .select('*')
         .in('id', outfit.item_ids || []);
       setSavedOutfit({ ...outfit, items: outfitItems || [] });
-
-      if (outfit.generated_image_url) {
-        const signedUrl = await getSignedUrl(outfit.generated_image_url);
-        setTryOnImageUrl(signedUrl);
-        setTryOnStatus('done');
-      }
     }
 
     setLoading(false);
@@ -382,27 +375,62 @@ export function TodayPage() {
     setGenerating(false);
   };
 
-  const generateTryOn = async (outfitId: string, outfitItems: ClothingItem[]) => {
-    if (!basePhotoUrl) return;
+  // CatVTON/IDM-VTON take one garment per body region per call. If both a
+  // base layer (shirts) and an outer layer (sweatshirt_jacket) are present,
+  // only the visible outer layer is sent for the "upper" step. Shoes/accessories
+  // are never included - neither model supports those categories.
+  const getTryOnStepItems = (outfitItems: ClothingItem[]): ClothingItem[] => {
+    const upperItem =
+      outfitItems.find(i => i.category === 'sweatshirt_jacket') ||
+      outfitItems.find(i => i.category === 'shirts');
+    const lowerItem = outfitItems.find(i => i.category === 'pants' || i.category === 'shorts');
+    return [upperItem, lowerItem].filter((i): i is ClothingItem => Boolean(i));
+  };
 
-    setTryOnStatus('generating');
-    setTryOnImageUrl(null);
+  const getComboKey = (stepItems: ClothingItem[]): string => stepItems.map(i => i.id).sort().join('-');
+
+  // Starts (or resumes watching) background generation for a specific item
+  // combination, keyed independent of any outfits row - so it can begin the
+  // moment a candidate is shown, before the user has committed to wearing it.
+  const ensureTryOn = async (outfitItems: ClothingItem[]) => {
+    if (!user || !basePhotoUrl) return;
+
+    const stepItems = getTryOnStepItems(outfitItems);
+    if (stepItems.length === 0) return;
+    const comboKey = getComboKey(stepItems);
+
+    const existingLocal = tryOnResults.get(comboKey);
+    if (existingLocal?.status === 'generating' || existingLocal?.status === 'done') return;
+
+    const { data: existingRow } = await supabase
+      .from('tryon_results')
+      .select('status, image_url, updated_at')
+      .eq('user_id', user.id)
+      .eq('combo_key', comboKey)
+      .maybeSingle();
+
+    const isStale = existingRow?.status === 'generating' &&
+      Date.now() - new Date(existingRow.updated_at).getTime() > 2 * 60 * 1000;
+
+    if (existingRow && existingRow.status !== 'failed' && !isStale) {
+      if (existingRow.status === 'done' && existingRow.image_url) {
+        const signedUrl = await getSignedUrl(existingRow.image_url);
+        setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl }));
+      } else {
+        setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'generating' }));
+      }
+      return;
+    }
+
+    setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'generating' }));
+    await supabase.from('tryon_results').upsert({
+      user_id: user.id,
+      combo_key: comboKey,
+      status: 'generating',
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,combo_key' });
 
     try {
-      // CatVTON/IDM-VTON take one garment per body region per call. If both a
-      // base layer (shirts) and an outer layer (sweatshirt_jacket) are present,
-      // only the visible outer layer is sent for the "upper" step.
-      const upperItem =
-        outfitItems.find(i => i.category === 'sweatshirt_jacket') ||
-        outfitItems.find(i => i.category === 'shirts');
-      const lowerItem = outfitItems.find(i => i.category === 'pants' || i.category === 'shorts');
-
-      const stepItems = [upperItem, lowerItem].filter((i): i is ClothingItem => Boolean(i));
-      if (stepItems.length === 0) {
-        setTryOnStatus('failed');
-        return;
-      }
-
       const photoPaths = stepItems.map(i => i.photo_url);
       const urlMap = await getSignedUrls(photoPaths);
 
@@ -416,31 +444,78 @@ export function TodayPage() {
       const response = await fetch(`${supabaseUrl}/functions/v1/outfit-tryon`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
-        body: JSON.stringify({ userId: user!.id, outfitId, basePhotoUrl, steps }),
+        body: JSON.stringify({ userId: user.id, comboKey, basePhotoUrl, steps }),
       });
 
-      if (!response.ok) {
-        console.error('outfit-tryon HTTP error:', response.status, await response.text().catch(() => ''));
-        setTryOnStatus('failed');
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok || !result?.success || !result?.path) {
+        console.error('outfit-tryon failed:', response.status, result?.error, 'failedStep:', result?.failedStep);
+        setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'failed' }));
         return;
       }
 
-      const result = await response.json();
-      if (!result.success || !result.path) {
-        console.error('outfit-tryon failed:', result.error, 'failedStep:', result.failedStep);
-        setTryOnStatus('failed');
-        return;
-      }
-
-      await supabase.from('outfits').update({ generated_image_url: result.path }).eq('id', outfitId);
       const signedUrl = await getSignedUrl(result.path);
-      setTryOnImageUrl(signedUrl);
-      setTryOnStatus('done');
+      setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl }));
     } catch (err) {
-      console.error('generateTryOn error:', err);
-      setTryOnStatus('failed');
+      // The Edge Function already persisted its own result server-side by this
+      // point in most failure modes (network drop here doesn't affect that) -
+      // the next visit's ensureTryOn() will pick up whatever it landed on.
+      console.error('ensureTryOn error:', err);
+      setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'failed' }));
     }
   };
+
+  // Trigger generation the moment a candidate outfit is shown or regenerated -
+  // not on "Wear This" - so it's already done (or in progress) by the time the
+  // user looks at it.
+  useEffect(() => {
+    if (outfits.length > 0 && outfits[currentIndex]) {
+      ensureTryOn(outfits[currentIndex].items);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outfits, currentIndex, basePhotoUrl]);
+
+  useEffect(() => {
+    if (savedOutfit?.items && savedOutfit.items.length > 0) {
+      ensureTryOn(savedOutfit.items);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedOutfit?.id, basePhotoUrl]);
+
+  const currentComboKey = savedOutfit?.items?.length
+    ? getComboKey(getTryOnStepItems(savedOutfit.items))
+    : outfits.length && outfits[currentIndex]
+      ? getComboKey(getTryOnStepItems(outfits[currentIndex].items))
+      : null;
+  const currentTryOnStatus = currentComboKey ? tryOnResults.get(currentComboKey)?.status : undefined;
+
+  // Lightweight polling only while something is actually generating, and only
+  // for as long as this component is mounted - navigating away just stops it;
+  // the result is already durably saved server-side and will show up next visit.
+  useEffect(() => {
+    if (!currentComboKey || currentTryOnStatus !== 'generating' || !user) return;
+
+    const interval = setInterval(async () => {
+      const { data } = await supabase
+        .from('tryon_results')
+        .select('status, image_url')
+        .eq('user_id', user.id)
+        .eq('combo_key', currentComboKey)
+        .maybeSingle();
+
+      if (data && data.status !== 'generating') {
+        if (data.status === 'done' && data.image_url) {
+          const signedUrl = await getSignedUrl(data.image_url);
+          setTryOnResults(prev => new Map(prev).set(currentComboKey, { status: 'done', imageUrl: signedUrl }));
+        } else {
+          setTryOnResults(prev => new Map(prev).set(currentComboKey, { status: 'failed' }));
+        }
+      }
+    }, 6000);
+
+    return () => clearInterval(interval);
+  }, [currentComboKey, currentTryOnStatus, user]);
 
   const wearOutfit = async (outfit: GeneratedOutfit) => {
     if (!user) return;
@@ -463,9 +538,9 @@ export function TodayPage() {
       return;
     }
 
-    if (basePhotoUrl) {
-      generateTryOn(data.id, outfit.items);
-    }
+    // Safety net only - ensureTryOn was already triggered when this candidate
+    // was shown/regenerated, so this is normally a no-op (already generating/done).
+    ensureTryOn(outfit.items);
 
     setSavedOutfit({ ...data, items: outfit.items });
     setOutfits([]);
@@ -621,16 +696,16 @@ export function TodayPage() {
             </div>
           </div>
 
-          {tryOnStatus === 'generating' && (
-            <div className="flex items-center justify-center gap-2 bg-white rounded-lg py-6 mb-3 text-sm text-slate-500">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Generating your look…
+          {currentTryOnStatus === 'generating' && (
+            <div className="flex items-center justify-center gap-2 bg-white rounded-lg py-4 mb-3 text-xs text-slate-400">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Still preparing your look…
             </div>
           )}
 
-          {tryOnStatus === 'done' && tryOnImageUrl && (
+          {currentTryOnStatus === 'done' && tryOnResults.get(currentComboKey!)?.imageUrl && (
             <div className="rounded-lg overflow-hidden bg-slate-100 mb-3 aspect-[3/4] max-h-96">
-              <img src={tryOnImageUrl} alt="Today's outfit on you" className="w-full h-full object-contain" />
+              <img src={tryOnResults.get(currentComboKey!)?.imageUrl} alt="Today's outfit on you" className="w-full h-full object-contain" />
             </div>
           )}
 
