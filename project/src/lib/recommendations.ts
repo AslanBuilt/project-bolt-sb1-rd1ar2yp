@@ -1,29 +1,36 @@
 import { ClothingItem, Formality, Season } from '../types';
 
-// Color harmony rules - which colors work well together
-const COLOR_HARMONY: Record<string, string[]> = {
-  neutral: ['black', 'white', 'gray', 'navy', 'beige', 'cream', 'tan', 'brown'],
-  warm: ['red', 'orange', 'yellow', 'burgundy', 'brown', 'beige', 'cream', 'gold'],
-  cool: ['blue', 'navy', 'purple', 'teal', 'turquoise', 'green', 'silver'],
-  earth: ['brown', 'beige', 'tan', 'cream', 'olive', 'burgundy', 'gold'],
-  accent: ['red', 'pink', 'purple', 'teal', 'turquoise', 'emerald', 'gold', 'silver'],
+// Real color-wheel logic (Wikipedia: Color scheme), replacing the previous
+// ad-hoc harmony/clash tables. Neutrals (per the same source - "black and
+// white have long been known to combine well with almost any other colors")
+// skip hue-distance scoring entirely and get a flat pairing bonus instead.
+const NEUTRAL_COLORS = ['black', 'white', 'gray', 'navy', 'beige', 'denim'];
+
+// Approximate hue in degrees (0-360) per tagged color name. A hardcoded
+// name->hue lookup is enough - color is already a tagged field per item, not
+// extracted from the photo itself.
+const COLOR_HUE_MAP: Record<string, number> = {
+  red: 0,
+  burgundy: 345,
+  pink: 330,
+  purple: 275,
+  blue: 210,
+  turquoise: 185,
+  teal: 175,
+  green: 120,
+  yellow: 55,
+  cream: 55,
+  gold: 45,
+  tan: 35,
+  brown: 25,
+  orange: 30,
+  silver: 45,
 };
 
-// Colors that generally clash and should be avoided together
-const CLASHING_PAIRS: [string, string][] = [
-  ['red', 'pink'],
-  ['orange', 'pink'],
-  ['yellow', 'purple'],
-  ['green', 'red'],
-];
-
-// Complementary color pairs (opposite on color wheel - can work with care)
-const COMPLEMENTARY_PAIRS: [string, string][] = [
-  ['blue', 'orange'],
-  ['red', 'green'],
-  ['purple', 'yellow'],
-  ['teal', 'burgundy'],
-];
+function getHue(color: string): number | null {
+  const key = color.toLowerCase().trim();
+  return key in COLOR_HUE_MAP ? COLOR_HUE_MAP[key] : null;
+}
 
 export interface OutfitScore {
   item: ClothingItem;
@@ -66,46 +73,64 @@ export function calculateRotationScore(item: ClothingItem): number {
 }
 
 /**
- * Check if two colors work well together
+ * Real color-wheel pairing score between two tagged colors (Wikipedia: Color
+ * scheme). Neutrals pair with anything (flat bonus, no hue math needed). For
+ * two chromatic colors, hue distance is bucketed into analogous (~30°),
+ * triadic (~120°), or complementary/split-complementary (~150-180°) bands,
+ * each with a modest bonus - the bands are intentionally close together
+ * since color harmony is subjective; this is a scoring nudge, never a hard
+ * filter. An unmapped color name (e.g. "multi-color", or a custom tag) fails
+ * safe to a small neutral-adjacent default rather than erroring or excluding
+ * the item.
  */
 export function colorsWorkTogether(color1: string, color2: string): { score: number; reason: string } {
-  const c1 = color1.toLowerCase();
-  const c2 = color2.toLowerCase();
+  const c1 = color1.toLowerCase().trim();
+  const c2 = color2.toLowerCase().trim();
 
-  if (c1 === c2) return { score: 50, reason: 'same color' };
+  if (c1 === c2) return { score: 75, reason: 'same color' };
 
-  // Check for clashing pairs
-  for (const [a, b] of CLASHING_PAIRS) {
-    if ((c1 === a && c2 === b) || (c1 === b && c2 === a)) {
-      return { score: 20, reason: 'potentially clashing' };
-    }
-  }
-
-  // Check if both are neutral - always works
-  if (COLOR_HARMONY.neutral.includes(c1) && COLOR_HARMONY.neutral.includes(c2)) {
+  if (NEUTRAL_COLORS.includes(c1) && NEUTRAL_COLORS.includes(c2)) {
     return { score: 95, reason: 'classic neutral pairing' };
   }
-
-  // Check if one is neutral - usually works
-  if (COLOR_HARMONY.neutral.includes(c1) || COLOR_HARMONY.neutral.includes(c2)) {
+  if (NEUTRAL_COLORS.includes(c1) || NEUTRAL_COLORS.includes(c2)) {
     return { score: 90, reason: 'neutral with accent' };
   }
 
-  // Check if both are in same harmony group
-  for (const group of Object.values(COLOR_HARMONY)) {
-    if (group.includes(c1) && group.includes(c2)) {
-      return { score: 80, reason: 'harmonious color family' };
-    }
+  const h1 = getHue(c1);
+  const h2 = getHue(c2);
+  if (h1 === null || h2 === null) {
+    return { score: 60, reason: 'unmapped color, default pairing' };
   }
 
-  // Complementary colors can work with caution
-  for (const [a, b] of COMPLEMENTARY_PAIRS) {
-    if ((c1 === a && c2 === b) || (c1 === b && c2 === a)) {
-      return { score: 60, reason: 'bold complementary pairing' };
+  const diff = Math.abs(h1 - h2);
+  const distance = Math.min(diff, 360 - diff);
+
+  if (distance <= 15) return { score: 65, reason: 'near-identical hues' };
+  if (distance <= 45) return { score: 70, reason: 'analogous hues (~30° apart)' };
+  if (distance <= 100) return { score: 55, reason: 'unrelated hues' };
+  if (distance <= 140) return { score: 78, reason: 'triadic hues (~120° apart)' };
+  if (distance <= 165) return { score: 82, reason: 'split-complementary hues' };
+  return { score: 88, reason: 'complementary hues (~180° apart)' };
+}
+
+/**
+ * Best color relationship between two items, considering each item's
+ * secondary_color alongside its primary_color - e.g. a striped shirt's
+ * accent color complementing the pants even if the primary colors alone
+ * don't relate as strongly.
+ */
+function bestColorMatch(a: ClothingItem, b: ClothingItem): { score: number; reason: string } {
+  const aColors = [a.primary_color, a.secondary_color].filter((c): c is string => Boolean(c));
+  const bColors = [b.primary_color, b.secondary_color].filter((c): c is string => Boolean(c));
+
+  let best = colorsWorkTogether(a.primary_color, b.primary_color);
+  for (const ac of aColors) {
+    for (const bc of bColors) {
+      const result = colorsWorkTogether(ac, bc);
+      if (result.score > best.score) best = result;
     }
   }
-
-  return { score: 50, reason: 'unknown combination' };
+  return best;
 }
 
 /**
@@ -119,7 +144,7 @@ export function calculateColorScore(items: ClothingItem[]): number {
 
   for (let i = 0; i < items.length; i++) {
     for (let j = i + 1; j < items.length; j++) {
-      const { score } = colorsWorkTogether(items[i].primary_color, items[j].primary_color);
+      const { score } = bestColorMatch(items[i], items[j]);
       totalScore += score;
       pairs++;
     }
