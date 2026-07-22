@@ -239,6 +239,29 @@ export function InspirationPage() {
     await fetchImages();
   };
 
+  // Re-opens the Style Summary/confirm screen for any already-analyzed photos
+  // that were never confirmed (e.g. "Review Later" was hit originally) - lets
+  // them be reviewed and applied without re-running analysis (no AI cost).
+  const reviewUnconfirmed = async () => {
+    const unconfirmed = images.filter(img => img.analyzed && !img.confirmed);
+    if (unconfirmed.length === 0) return;
+
+    setAggregated(aggregateProfile(unconfirmed));
+    setNewlyUploadedIds(unconfirmed.map(img => img.id));
+
+    const paths = unconfirmed.map(img => img.photo_url).filter(Boolean);
+    const urlMap = await getSignedUrls(paths);
+    setSummaryImageUrls(urlMap);
+
+    setShowSummary(true);
+  };
+
+  const confirmSingleImage = async (img: InspirationImage) => {
+    await supabase.from('inspiration_images').update({ confirmed: true }).eq('id', img.id);
+    await fetchImages();
+    setSelectedImage(prev => prev && prev.id === img.id ? { ...prev, confirmed: true } : prev);
+  };
+
   const deleteImage = async (img: InspirationImage) => {
     await supabase.from('inspiration_images').delete().eq('id', img.id);
     setImages(images.filter(i => i.id !== img.id));
@@ -492,6 +515,17 @@ export function InspirationPage() {
         </div>
       )}
 
+      {/* Unconfirmed but already-analyzed photos (e.g. "Review Later" was hit) */}
+      {images.some(img => img.analyzed && !img.confirmed) && (
+        <button
+          onClick={reviewUnconfirmed}
+          className="w-full flex items-center justify-center gap-2 bg-violet-50 hover:bg-violet-100 border border-violet-200 text-violet-700 text-sm font-medium py-2.5 rounded-xl transition-colors mb-4"
+        >
+          <Sparkles className="w-4 h-4" />
+          Review {images.filter(img => img.analyzed && !img.confirmed).length} unconfirmed {images.filter(img => img.analyzed && !img.confirmed).length === 1 ? 'photo' : 'photos'}
+        </button>
+      )}
+
       {/* Images Grid */}
       {images.length === 0 ? (
         <div className="text-center py-12">
@@ -601,25 +635,34 @@ export function InspirationPage() {
                     {new Date(selectedImage.created_at).toLocaleDateString()}
                   </span>
                 </div>
-                {!selectedImage.analyzed && (
-            <button
-              onClick={() => retryAnalysis(selectedImage)}
-              disabled={retryingId === selectedImage.id}
-              className="w-full flex items-center justify-center gap-2 bg-violet-50 hover:bg-violet-100 disabled:opacity-60 text-violet-700 text-sm font-medium py-2 rounded-lg transition-colors mb-3"
-              >
-              {retryingId === selectedImage.id ? (
-                <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Retrying...
-                </>
-                ) : (
-                <>
-                <RefreshCw className="w-3.5 h-3.5" />
-                Retry analysis
-                </>
-                )}
-            </button>
-        )}
+                <div className="flex gap-2 mb-3">
+                  {selectedImage.analyzed && !selectedImage.confirmed && (
+                    <button
+                      onClick={() => confirmSingleImage(selectedImage)}
+                      className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium py-2 rounded-lg transition-colors"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      Confirm
+                    </button>
+                  )}
+                  <button
+                    onClick={() => retryAnalysis(selectedImage)}
+                    disabled={retryingId === selectedImage.id}
+                    className="flex-1 flex items-center justify-center gap-2 bg-violet-50 hover:bg-violet-100 disabled:opacity-60 text-violet-700 text-sm font-medium py-2 rounded-lg transition-colors"
+                  >
+                    {retryingId === selectedImage.id ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Retrying...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        {selectedImage.analyzed ? 'Re-run analysis' : 'Retry analysis'}
+                      </>
+                    )}
+                  </button>
+                </div>
 
                 {selectedImage.analyzed && (
                   <>
