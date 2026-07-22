@@ -437,6 +437,7 @@ export function TodayPage() {
       const steps = stepItems.map(i => ({
         category: i.category === 'sweatshirt_jacket' || i.category === 'shirts' ? 'upper' : 'lower',
         photoUrl: urlMap.get(i.photo_url) || i.photo_url,
+        description: `${i.primary_color} ${i.subcategory}`.trim(),
       }));
 
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;

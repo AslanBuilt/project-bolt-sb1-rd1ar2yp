@@ -16,6 +16,7 @@ type SupportedCategory = "upper" | "lower";
 interface StepInput {
   category: string;
   photoUrl: string;
+  description?: string;
 }
 
 interface TryOnRequest {
@@ -92,12 +93,12 @@ async function callIdmVton(
   personBlob: Blob,
   garmentBlob: Blob,
   category: SupportedCategory,
+  description: string,
   hfToken: string,
   logPrefix: string
 ): Promise<Blob> {
-  console.log(`${logPrefix} calling IDM-VTON: personBlob=${personBlob.size}B garmentBlob=${garmentBlob.size}B category=${category}`);
+  console.log(`${logPrefix} calling IDM-VTON: personBlob=${personBlob.size}B garmentBlob=${garmentBlob.size}B category=${category} description="${description}"`);
   const client = await Client.connect("yisol/IDM-VTON", { hf_token: hfToken as `hf_${string}` });
-  const description = category === "upper" ? "top garment" : "bottom garment";
   const result = await client.predict("/tryon", [
     { background: handle_file(personBlob), layers: [], composite: null },
     handle_file(garmentBlob),
@@ -115,17 +116,19 @@ async function tryStep(
   personBlob: Blob,
   garmentBlob: Blob,
   category: SupportedCategory,
+  description: string,
   hfToken: string,
-  logPrefix: string
+  logPrefix: string,
+  maxAttempts: number
 ): Promise<Blob | null> {
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return model === "catvton"
         ? await callCatVTON(personBlob, garmentBlob, category, hfToken, logPrefix)
-        : await callIdmVton(personBlob, garmentBlob, category, hfToken, logPrefix);
+        : await callIdmVton(personBlob, garmentBlob, category, description, hfToken, logPrefix);
     } catch (err) {
-      console.error(`${logPrefix} ${model} attempt ${attempt} failed for category=${category}:`, err);
-      if (attempt === 1) {
+      console.error(`${logPrefix} ${model} attempt ${attempt}/${maxAttempts} failed for category=${category}:`, err);
+      if (attempt < maxAttempts) {
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     }
@@ -232,11 +235,17 @@ Deno.serve(async (req: Request) => {
         break;
       }
 
-      let stepResult = await tryStep("catvton", currentImageBlob, garmentBlob, step.category, hfToken, logPrefix);
+      const description = step.description?.trim() || (step.category === "upper" ? "top garment" : "bottom garment");
+
+      // CatVTON gets a single attempt: live diagnostics show it currently fails
+      // with the same server-side "IndexError" on every single call regardless
+      // of input, so a second attempt is pure wasted latency right now. IDM-VTON
+      // (the model actually succeeding) gets the full retry budget instead.
+      let stepResult = await tryStep("catvton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 1);
       let stepModel: "catvton" | "idm-vton" = "catvton";
 
       if (!stepResult) {
-        stepResult = await tryStep("idm-vton", currentImageBlob, garmentBlob, step.category, hfToken, logPrefix);
+        stepResult = await tryStep("idm-vton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 2);
         stepModel = "idm-vton";
       }
 
