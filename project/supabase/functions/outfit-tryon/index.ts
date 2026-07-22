@@ -237,15 +237,27 @@ Deno.serve(async (req: Request) => {
 
       const description = step.description?.trim() || (step.category === "upper" ? "top garment" : "bottom garment");
 
-      // CatVTON gets a single attempt: live diagnostics show it currently fails
-      // with the same server-side "IndexError" on every single call regardless
-      // of input, so a second attempt is pure wasted latency right now. IDM-VTON
-      // (the model actually succeeding) gets the full retry budget instead.
-      let stepResult = await tryStep("catvton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 1);
-      let stepModel: "catvton" | "idm-vton" = "catvton";
+      // CatVTON is currently disabled entirely: live diagnostics show a 0%
+      // success rate across every logged attempt today (server-side
+      // "IndexError" crashes or ZeroGPU quota rejections), and every failed
+      // attempt still burns real ZeroGPU quota that the later chained step
+      // (lower) then needs. Calling a model with a proven 0% success rate is
+      // pure waste here - re-enable if the Space stabilizes.
+      const CATVTON_ENABLED = false;
+      let stepResult: Blob | null = null;
+      let stepModel: "catvton" | "idm-vton" = "idm-vton";
+
+      if (CATVTON_ENABLED) {
+        stepResult = await tryStep("catvton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 1);
+        stepModel = "catvton";
+      }
 
       if (!stepResult) {
-        stepResult = await tryStep("idm-vton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 2);
+        // Single attempt, not retried: logs show a retry has never once
+        // recovered from a first-attempt failure today (the identical error
+        // - usually quota exhaustion - just recurs seconds later). Retrying
+        // only spends more of the scarce shared quota for no observed benefit.
+        stepResult = await tryStep("idm-vton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 1);
         stepModel = "idm-vton";
       }
 

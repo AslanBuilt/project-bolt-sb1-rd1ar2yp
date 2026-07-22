@@ -53,7 +53,7 @@ export function TodayPage() {
   const [pastOutfitCombos, setPastOutfitCombos] = useState<Map<string, { timesWorn: number; lastWorn: string }>>(new Map());
   const [suggestedRatings, setSuggestedRatings] = useState<Map<string, 'up' | 'down'>>(new Map());
   const [basePhotoUrl, setBasePhotoUrl] = useState<string | null>(null);
-  const [tryOnResults, setTryOnResults] = useState<Map<string, { status: 'generating' | 'done' | 'failed'; imageUrl?: string }>>(new Map());
+  const [tryOnResults, setTryOnResults] = useState<Map<string, { status: 'generating' | 'done' | 'failed'; imageUrl?: string; failedStep?: string | null }>>(new Map());
 
   useEffect(() => {
     if (user) {
@@ -404,7 +404,7 @@ export function TodayPage() {
 
     const { data: existingRow } = await supabase
       .from('tryon_results')
-      .select('status, image_url, updated_at')
+      .select('status, image_url, failed_step, updated_at')
       .eq('user_id', user.id)
       .eq('combo_key', comboKey)
       .maybeSingle();
@@ -415,7 +415,7 @@ export function TodayPage() {
     if (existingRow && existingRow.status !== 'failed' && !isStale) {
       if (existingRow.status === 'done' && existingRow.image_url) {
         const signedUrl = await getSignedUrl(existingRow.image_url);
-        setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl }));
+        setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl, failedStep: existingRow.failed_step }));
       } else {
         setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'generating' }));
       }
@@ -457,7 +457,7 @@ export function TodayPage() {
       }
 
       const signedUrl = await getSignedUrl(result.path);
-      setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl }));
+      setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl, failedStep: result.failedStep ?? null }));
     } catch (err) {
       // The Edge Function already persisted its own result server-side by this
       // point in most failure modes (network drop here doesn't affect that) -
@@ -500,7 +500,7 @@ export function TodayPage() {
     const interval = setInterval(async () => {
       const { data } = await supabase
         .from('tryon_results')
-        .select('status, image_url')
+        .select('status, image_url, failed_step')
         .eq('user_id', user.id)
         .eq('combo_key', currentComboKey)
         .maybeSingle();
@@ -508,7 +508,7 @@ export function TodayPage() {
       if (data && data.status !== 'generating') {
         if (data.status === 'done' && data.image_url) {
           const signedUrl = await getSignedUrl(data.image_url);
-          setTryOnResults(prev => new Map(prev).set(currentComboKey, { status: 'done', imageUrl: signedUrl }));
+          setTryOnResults(prev => new Map(prev).set(currentComboKey, { status: 'done', imageUrl: signedUrl, failedStep: data.failed_step }));
         } else {
           setTryOnResults(prev => new Map(prev).set(currentComboKey, { status: 'failed' }));
         }
@@ -705,8 +705,15 @@ export function TodayPage() {
           )}
 
           {currentTryOnStatus === 'done' && tryOnResults.get(currentComboKey!)?.imageUrl && (
-            <div className="rounded-lg overflow-hidden bg-slate-100 mb-3 aspect-[3/4] max-h-96">
-              <img src={tryOnResults.get(currentComboKey!)?.imageUrl} alt="Today's outfit on you" className="w-full h-full object-contain" />
+            <div className="mb-3">
+              <div className="rounded-lg overflow-hidden bg-slate-100 aspect-[3/4] max-h-96">
+                <img src={tryOnResults.get(currentComboKey!)?.imageUrl} alt="Today's outfit on you" className="w-full h-full object-contain" />
+              </div>
+              {tryOnResults.get(currentComboKey!)?.failedStep && (
+                <p className="text-xs text-amber-600 mt-1">
+                  Couldn't update the {tryOnResults.get(currentComboKey!)?.failedStep} in this visualization — showing the rest as generated.
+                </p>
+              )}
             </div>
           )}
 
