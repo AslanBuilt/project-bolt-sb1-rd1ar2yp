@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { Client } from "npm:@gradio/client@1";
+import { Client, handle_file } from "npm:@gradio/client@1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -47,7 +47,9 @@ async function fetchAsBlob(url: string, label: string): Promise<Blob> {
 // Gradio image-output results can come back in a few shapes depending on
 // client/space version: a Blob directly, a FileData object with .url or
 // .path, or a bare URL string. Handle all of them defensively.
-async function extractResultBlob(result: { data?: unknown[] }, spaceHost: string): Promise<Blob> {
+async function extractResultBlob(result: { data?: unknown[] }, spaceHost: string, logPrefix: string): Promise<Blob> {
+  console.log(`${logPrefix} raw predict() result:`, JSON.stringify(result).slice(0, 1000));
+
   const data = result?.data?.[0] as
     | Blob
     | string
@@ -69,39 +71,43 @@ async function callCatVTON(
   personBlob: Blob,
   garmentBlob: Blob,
   clothType: SupportedCategory,
-  hfToken: string
+  hfToken: string,
+  logPrefix: string
 ): Promise<Blob> {
+  console.log(`${logPrefix} calling CatVTON: personBlob=${personBlob.size}B garmentBlob=${garmentBlob.size}B clothType=${clothType}`);
   const client = await Client.connect("zhengchong/CatVTON", { hf_token: hfToken as `hf_${string}` });
   const result = await client.predict("/submit_function", [
-    { background: personBlob, layers: [], composite: null },
-    garmentBlob,
+    { background: handle_file(personBlob), layers: [], composite: null },
+    handle_file(garmentBlob),
     clothType,
     30, // inference steps (default is 50; lowered for speed on a free ZeroGPU quota)
     2.5, // CFG strength (Space default)
     -1, // seed (-1 = random)
     "result only",
   ]);
-  return await extractResultBlob(result, "zhengchong-catvton.hf.space");
+  return await extractResultBlob(result, "zhengchong-catvton.hf.space", logPrefix);
 }
 
 async function callIdmVton(
   personBlob: Blob,
   garmentBlob: Blob,
   category: SupportedCategory,
-  hfToken: string
+  hfToken: string,
+  logPrefix: string
 ): Promise<Blob> {
+  console.log(`${logPrefix} calling IDM-VTON: personBlob=${personBlob.size}B garmentBlob=${garmentBlob.size}B category=${category}`);
   const client = await Client.connect("yisol/IDM-VTON", { hf_token: hfToken as `hf_${string}` });
   const description = category === "upper" ? "top garment" : "bottom garment";
   const result = await client.predict("/tryon", [
-    { background: personBlob, layers: [], composite: null },
-    garmentBlob,
+    { background: handle_file(personBlob), layers: [], composite: null },
+    handle_file(garmentBlob),
     description,
     true, // use auto-generated mask
     false, // use auto-crop & resizing
     30, // denoising steps
     42, // seed
   ]);
-  return await extractResultBlob(result, "yisol-idm-vton.hf.space");
+  return await extractResultBlob(result, "yisol-idm-vton.hf.space", logPrefix);
 }
 
 async function tryStep(
@@ -115,8 +121,8 @@ async function tryStep(
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       return model === "catvton"
-        ? await callCatVTON(personBlob, garmentBlob, category, hfToken)
-        : await callIdmVton(personBlob, garmentBlob, category, hfToken);
+        ? await callCatVTON(personBlob, garmentBlob, category, hfToken, logPrefix)
+        : await callIdmVton(personBlob, garmentBlob, category, hfToken, logPrefix);
     } catch (err) {
       console.error(`${logPrefix} ${model} attempt ${attempt} failed for category=${category}:`, err);
       if (attempt === 1) {
@@ -160,11 +166,16 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const logPrefixBase = `outfit-tryon[${outfitId}]`;
+    console.log(`${logPrefixBase} basePhotoUrl=${basePhotoUrl}`);
+    console.log(`${logPrefixBase} steps received:`, JSON.stringify(steps));
+
     let currentImageBlob: Blob;
     try {
       currentImageBlob = await fetchAsBlob(basePhotoUrl, "base photo");
+      console.log(`${logPrefixBase} base photo fetched: ${currentImageBlob.size} bytes`);
     } catch (err) {
-      console.error("outfit-tryon: failed to fetch base photo:", err);
+      console.error(`${logPrefixBase} failed to fetch base photo:`, err);
       return json({ success: false, error: "Could not load base photo", skipped }, 200);
     }
 
@@ -173,10 +184,12 @@ Deno.serve(async (req: Request) => {
     let failedStep: string | null = null;
 
     for (const step of supportedSteps) {
-      const logPrefix = `outfit-tryon[${outfitId}]`;
+      const logPrefix = logPrefixBase;
+      console.log(`${logPrefix} step category=${step.category} photoUrl=${step.photoUrl}`);
       let garmentBlob: Blob;
       try {
         garmentBlob = await fetchAsBlob(step.photoUrl, `${step.category} garment photo`);
+        console.log(`${logPrefix} garment photo fetched for ${step.category}: ${garmentBlob.size} bytes`);
       } catch (err) {
         console.error(`${logPrefix} failed to fetch garment photo for ${step.category}:`, err);
         failedStep = step.category;
@@ -197,6 +210,7 @@ Deno.serve(async (req: Request) => {
         break;
       }
 
+      console.log(`${logPrefix} step ${step.category} succeeded via ${stepModel}, result size=${stepResult.size} bytes`);
       currentImageBlob = stepResult;
       modelUsed = modelUsed ?? stepModel;
       stepsCompleted.push(step.category);
@@ -218,9 +232,11 @@ Deno.serve(async (req: Request) => {
       .upload(path, arrayBuffer, { contentType: "image/jpeg", upsert: true });
 
     if (uploadError) {
-      console.error("outfit-tryon: storage upload failed:", uploadError);
+      console.error(`${logPrefixBase} storage upload failed:`, uploadError);
       return json({ success: false, error: "Failed to store generated image", stepsCompleted, skipped }, 200);
     }
+
+    console.log(`${logPrefixBase} success: path=${path} stepsCompleted=${stepsCompleted.join(",")} modelUsed=${modelUsed}`);
 
     return json(
       {
