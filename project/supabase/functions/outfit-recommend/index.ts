@@ -15,6 +15,14 @@ interface ClothingItem {
   pattern: string;
   formality: string;
   season: string;
+  last_worn_date?: string | null;
+}
+
+function formatRecency(item: ClothingItem, recentlyWornIds: string[]): string {
+  if (!item.last_worn_date) return 'never worn';
+  const days = Math.floor((Date.now() - new Date(item.last_worn_date).getTime()) / (1000 * 60 * 60 * 24));
+  const flag = recentlyWornIds?.includes(item.id) ? ' — WORN RECENTLY, avoid if a suitable alternative exists' : '';
+  return `last worn ${days}d ago${flag}`;
 }
 
 interface StylePreferences {
@@ -40,7 +48,8 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { items, activityText, preferences, weather, inspirationProfile, ratingHistory } = await req.json();
+    const { items, activityText, preferences, weather, inspirationProfile, ratingHistory, recentlyWornIds } = await req.json();
+    const wornRecentlyIds: string[] = recentlyWornIds || [];
 
     if (!items || items.length < 3) {
       return new Response(
@@ -145,19 +154,19 @@ ${weatherContext}${ratingContext}
 Available wardrobe items (organized by category):
 
 SHIRTS (${tops.length} available):
-${tops.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}`).join('\n')}
+${tops.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}, ${formatRecency(i, wornRecentlyIds)}`).join('\n')}
 
 PANTS (${bottoms.length} available):
-${bottoms.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}`).join('\n')}
+${bottoms.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}, ${formatRecency(i, wornRecentlyIds)}`).join('\n')}
 
 SHORTS (${dresses.length} available):
-${dresses.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}`).join('\n')}
+${dresses.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}, ${formatRecency(i, wornRecentlyIds)}`).join('\n')}
 
 SHOES (${shoes.length} available):
-${shoes.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}`).join('\n')}
+${shoes.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}, ${formatRecency(i, wornRecentlyIds)}`).join('\n')}
 
 SWEATSHIRT/JACKETS (${outerwear.length} available):
-${outerwear.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}`).join('\n')}
+${outerwear.map(i => `- ${i.id}: ${i.primary_color} ${i.subcategory}, ${i.formality}, ${formatRecency(i, wornRecentlyIds)}`).join('\n')}
 
 Rules:
 1. Each outfit must be complete: a SHIRT + (PANTS or SHORTS) + SHOES
@@ -165,8 +174,9 @@ Rules:
 3. Consider color coordination - neutral colors (black, white, gray, navy, beige) pair well with everything
 4. All items should match the activity formality level
 5. Where possible, prefer items whose colors, silhouettes, and patterns align with the user's inspiration style profile above
-6. Learn from the user's past ratings: favor combinations similar to those they liked, and avoid combinations similar to those they disliked
-7. Provide 1-3 outfit suggestions
+6. Avoid items marked "WORN RECENTLY" when a suitable alternative exists in the same category — vary the outfit from recent days where possible. Only reuse a recently-worn item if there's no other option in that category.
+7. Learn from the user's past ratings: favor combinations similar to those they liked, and avoid combinations similar to those they disliked
+8. Provide 1-3 outfit suggestions
 
 Respond with ONLY a JSON array (no markdown, no explanation):
 [

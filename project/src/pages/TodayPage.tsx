@@ -215,6 +215,29 @@ export function TodayPage() {
       eligibleItems = eligibleItems.filter(i => i.formality === 'casual' || i.formality === 'smart-casual');
     }
 
+    // Fetch confirmed inspiration profile up front so it can influence both
+    // the immediate rule-based pass and the AI pass below - previously this
+    // was only fetched inside the AI pass, so it silently had zero effect on
+    // days the AI pass failed or was rate-limited.
+    let inspirationProfile: { colorPalette: string[]; silhouettes: string[]; patternTrends: string[] } | null = null;
+    try {
+      const { data: inspirationData } = await supabase
+        .from('inspiration_images')
+        .select('color_palette, silhouette, pattern_trends')
+        .eq('analyzed', true)
+        .eq('confirmed', true);
+
+      inspirationProfile = inspirationData && inspirationData.length > 0
+        ? {
+            colorPalette: inspirationData.flatMap((d: { color_palette: string[] }) => d.color_palette || []),
+            silhouettes: inspirationData.map((d: { silhouette: string }) => d.silhouette).filter(Boolean),
+            patternTrends: inspirationData.flatMap((d: { pattern_trends: string[] }) => d.pattern_trends || []),
+          }
+        : null;
+    } catch (e) {
+      console.error('Failed to fetch inspiration profile:', e);
+    }
+
     // ---- Pass 1: Rule-based (show immediately) ----
     const scores = filterAndScoreItems({
       items: eligibleItems,
@@ -222,11 +245,12 @@ export function TodayPage() {
       season,
       recentlyWornIds,
       pastRatings,
+      inspirationProfile,
     });
 
     const ruleCandidates = generateOutfitCandidates(
       scores,
-      { items: eligibleItems, formality, season, recentlyWornIds, pastRatings }
+      { items: eligibleItems, formality, season, recentlyWornIds, pastRatings, inspirationProfile }
     );
 
     const ruleOutfits: GeneratedOutfit[] = ruleCandidates.map(outfitItems => {
@@ -263,20 +287,7 @@ export function TodayPage() {
         .eq('user_id', user!.id)
         .maybeSingle();
 
-      // Fetch aggregated inspiration profile
-      const { data: inspirationData } = await supabase
-        .from('inspiration_images')
-        .select('color_palette, silhouette, pattern_trends')
-        .eq('analyzed', true)
-        .eq('confirmed', true);
-
-      const inspirationProfile = inspirationData && inspirationData.length > 0
-        ? {
-            colorPalette: inspirationData.flatMap((d: { color_palette: string[] }) => d.color_palette || []),
-            silhouettes: inspirationData.map((d: { silhouette: string }) => d.silhouette).filter(Boolean),
-            patternTrends: inspirationData.flatMap((d: { pattern_trends: string[] }) => d.pattern_trends || []),
-          }
-        : null;
+      // inspirationProfile was already fetched above, before Pass 1
 
       // Fetch rated outfit history for the recommendation engine
       const { data: ratedOutfits } = await supabase
@@ -331,12 +342,14 @@ export function TodayPage() {
             pattern: i.pattern,
             formality: i.formality,
             season: i.season,
+            last_worn_date: i.last_worn_date || null,
           })),
           activityText: activity,
           preferences: prefs,
           weather: weather ? { temp: weather.temp, condition: weather.condition } : null,
           inspirationProfile,
           ratingHistory,
+          recentlyWornIds,
         }),
       });
 

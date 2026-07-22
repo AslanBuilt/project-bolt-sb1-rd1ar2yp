@@ -34,6 +34,12 @@ export interface OutfitScore {
   totalScore: number;
 }
 
+export interface InspirationProfile {
+  colorPalette: string[];
+  silhouettes: string[];
+  patternTrends: string[];
+}
+
 export interface RecommendationContext {
   items: ClothingItem[];
   formality: Formality;
@@ -41,6 +47,7 @@ export interface RecommendationContext {
   activityText?: string;
   recentlyWornIds: string[];
   pastRatings: { item_id: string; rating: 'up' | 'down' }[];
+  inspirationProfile?: InspirationProfile | null;
 }
 
 /**
@@ -257,7 +264,7 @@ export function filterAndScoreItems(context: RecommendationContext): {
   shoes: OutfitScore[];
   outerwear: OutfitScore[];
 } {
-  const { items, formality, season, recentlyWornIds, pastRatings } = context;
+  const { items, formality, season, recentlyWornIds, pastRatings, inspirationProfile } = context;
 
   const categorize = (category: string) => {
     return items
@@ -282,7 +289,26 @@ export function filterAndScoreItems(context: RecommendationContext): {
 
         const seasonScore = item.season === 'all' || item.season === season ? 100 : 50;
 
-        const totalScore = rotationScore + ratingBonus + recentlyWornPenalty + formalityScore + seasonScore;
+        // Boost items whose color/pattern align with the user's confirmed
+        // inspiration profile, so inspiration still has an effect on days the
+        // AI pass isn't used (fails, rate-limited, etc.) - not just the AI pass.
+        let inspirationBonus = 0;
+        const color = item.primary_color.toLowerCase();
+        if (inspirationProfile?.colorPalette?.some(c => {
+          const cl = c.toLowerCase();
+          return cl === color || cl.includes(color) || color.includes(cl);
+        })) {
+          inspirationBonus += 15;
+        }
+        const pattern = item.pattern.toLowerCase();
+        if (inspirationProfile?.patternTrends?.some(p => {
+          const pl = p.toLowerCase();
+          return pl.includes(pattern) || pattern.includes(pl);
+        })) {
+          inspirationBonus += 10;
+        }
+
+        const totalScore = rotationScore + ratingBonus + recentlyWornPenalty + formalityScore + seasonScore + inspirationBonus;
 
         return { item, rotationScore, colorScore: 0, formalityScore, seasonScore, totalScore };
       })
