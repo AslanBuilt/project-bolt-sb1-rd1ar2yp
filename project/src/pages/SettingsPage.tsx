@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { STYLE_TAGS } from '../types';
 import { getSignedUrl, uploadBasePhoto } from '../lib/storage';
 import { geocodeLocation } from '../lib/weather';
-import { Check, Loader2, Palette, Trash2, User, Upload, MapPin, Thermometer } from 'lucide-react';
+import { Check, Loader2, Palette, Trash2, User, Upload, MapPin, Thermometer, BarChart3, ChevronRight } from 'lucide-react';
 
 const FORMALITY_LEVELS = [
   { value: 'casual', label: 'Casual' },
@@ -25,6 +26,7 @@ interface StylePreferences {
 
 export function SettingsPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [preferences, setPreferences] = useState<StylePreferences>({
@@ -192,6 +194,23 @@ export function SettingsPage() {
           <p className="text-sm text-slate-500">Outfits worn</p>
         </div>
       </div>
+
+      {/* Insights entry point */}
+      <button
+        onClick={() => navigate('/insights')}
+        className="w-full flex items-center justify-between bg-white rounded-xl border border-slate-200 p-4 mb-4 hover:border-emerald-300 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 bg-emerald-100 rounded-lg flex items-center justify-center">
+            <BarChart3 className="w-4.5 h-4.5 text-emerald-600" />
+          </div>
+          <div className="text-left">
+            <p className="font-medium text-slate-900 text-sm">Closet Insights</p>
+            <p className="text-xs text-slate-500">Stats, most/least worn, what's sitting unused</p>
+          </div>
+        </div>
+        <ChevronRight className="w-4 h-4 text-slate-400" />
+      </button>
 
       {/* User info */}
       <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">

@@ -123,7 +123,7 @@ export function ClosetPage() {
               : 'bg-white border-slate-300 text-slate-600 hover:border-slate-400'
           }`}
         >
-          {showRetired ? 'Hide Retired' : 'Show Retired'}
+          {showRetired ? 'Hide Archived' : 'Show Archived'}
         </button>
       </div>
 
@@ -202,7 +202,7 @@ export function ClosetPage() {
               )}
               {item.retired && (
                 <div className="absolute top-3 left-8 px-2 py-0.5 bg-slate-700 rounded text-xs text-white font-medium">
-                  Retired
+                  Archived
                 </div>
               )}
             </div>
@@ -271,7 +271,7 @@ export function ClosetPage() {
                   onClick={() => confirmingDelete ? setConfirmingDelete(false) : toggleRetired(selectedItem)}
                   className={confirmingDelete ? 'flex-1 py-2.5 rounded-lg font-medium text-sm bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors' : (selectedItem.retired ? 'flex-1 py-2.5 rounded-lg font-medium text-sm bg-emerald-600 text-white hover:bg-emerald-700 transition-colors' : 'flex-1 py-2.5 rounded-lg font-medium text-sm bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors')}
                 >
-                  {confirmingDelete ? 'Cancel' : selectedItem.retired ? 'Restore Item' : 'Retire Item'}
+                  {confirmingDelete ? 'Cancel' : selectedItem.retired ? 'Unarchive Item' : 'Archive Item'}
                 </button>
                 <button
                   onClick={() => confirmingDelete ? deleteItem(selectedItem) : setConfirmingDelete(true)}

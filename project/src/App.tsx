@@ -8,6 +8,7 @@ import { AddItemPage } from './pages/AddItemPage';
 import { HistoryPage } from './pages/HistoryPage';
 import { InspirationPage } from './pages/InspirationPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { InsightsPage } from './pages/InsightsPage';
 import { supabase } from './lib/supabase';
 import { useState, useEffect } from 'react';
 
@@ -68,6 +69,7 @@ function AppRoutes() {
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/inspiration" element={<InspirationPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/insights" element={<InsightsPage />} />
         <Route path="*" element={<Navigate to="/today" replace />} />
       </Route>
     </Routes>

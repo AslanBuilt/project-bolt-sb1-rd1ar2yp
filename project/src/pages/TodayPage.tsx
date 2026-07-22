@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { getSignedUrl, getSignedUrls } from '../lib/storage';
@@ -26,7 +27,12 @@ import {
   Info,
   Wand2,
   Repeat,
+  Archive,
+  X,
 } from 'lucide-react';
+
+const NUDGE_THRESHOLD_DAYS = 30;
+const NUDGE_DISMISS_KEY = 'haventWornNudgeDismissedDate';
 
 interface GeneratedOutfit {
   id: string;
@@ -38,6 +44,10 @@ interface GeneratedOutfit {
 
 export function TodayPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const [nudgeDismissed, setNudgeDismissed] = useState(
+    () => localStorage.getItem(NUDGE_DISMISS_KEY) === new Date().toISOString().split('T')[0]
+  );
   const [items, setItems] = useState<ClothingItem[]>([]);
   const [signedUrls, setSignedUrls] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -655,6 +665,20 @@ export function TodayPage() {
 
   const currentOutfit = outfits[currentIndex];
 
+  // `items` is already fetched with retired=false, so archived items are
+  // already excluded here with no extra query needed.
+  const notWornCount = items.filter(i => {
+    if (!i.last_worn_date) return true;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - NUDGE_THRESHOLD_DAYS);
+    return new Date(i.last_worn_date) < cutoff;
+  }).length;
+
+  const dismissNudge = () => {
+    localStorage.setItem(NUDGE_DISMISS_KEY, new Date().toISOString().split('T')[0]);
+    setNudgeDismissed(true);
+  };
+
   if (loading) {
     return (
       <div className="p-4 flex items-center justify-center min-h-[60vh]">
@@ -692,6 +716,22 @@ export function TodayPage() {
           </div>
         )}
       </div>
+
+      {/* Haven't worn nudge */}
+      {!nudgeDismissed && notWornCount > 0 && (
+        <div className="flex items-center gap-2 bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5 mb-4">
+          <Archive className="w-4 h-4 text-violet-500 flex-shrink-0" />
+          <button
+            onClick={() => navigate('/insights')}
+            className="flex-1 text-left text-sm text-violet-700 hover:underline"
+          >
+            {notWornCount} {notWornCount === 1 ? 'item hasn\'t' : 'items haven\'t'} been worn in {NUDGE_THRESHOLD_DAYS}+ days - take a look?
+          </button>
+          <button onClick={dismissNudge} className="text-violet-400 hover:text-violet-600 flex-shrink-0">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Weather hints */}
       {weatherHints.length > 0 && (
