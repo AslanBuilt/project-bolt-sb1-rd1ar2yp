@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { uploadClothingPhoto } from '../lib/storage';
+import { getWarmthBand } from '../lib/warmth';
 import { useAuth } from '../contexts/AuthContext';
 import { CATEGORY_SUBCATEGORIES, COLORS, ClothingCategory, Pattern, Formality, Season } from '../types';
 import { Camera, X, ChevronDown, Check, Loader2, Sparkles, Wand2, AlertCircle } from 'lucide-react';
@@ -173,6 +174,8 @@ export function AddItemPage() {
         .filter(([, conf]) => conf < CONFIDENCE_THRESHOLD)
         .map(([field]) => field);
 
+      const warmthBand = getWarmthBand(category, subcategory);
+
       const { error } = await supabase.from('clothing_items').insert({
         id,
         user_id: user.id,
@@ -186,6 +189,8 @@ export function AddItemPage() {
         season,
         ai_confidence: aiConfidence,
         ai_uncertain_fields: uncertainFields,
+        warmth_min_f: warmthBand.min,
+        warmth_max_f: warmthBand.max,
       });
 
       if (error) throw error;

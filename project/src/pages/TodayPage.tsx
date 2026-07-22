@@ -53,12 +53,12 @@ export function TodayPage() {
   const [pastOutfitCombos, setPastOutfitCombos] = useState<Map<string, { timesWorn: number; lastWorn: string }>>(new Map());
   const [suggestedRatings, setSuggestedRatings] = useState<Map<string, 'up' | 'down'>>(new Map());
   const [basePhotoUrl, setBasePhotoUrl] = useState<string | null>(null);
+  const [tempOffsetF, setTempOffsetF] = useState(0);
   const [tryOnResults, setTryOnResults] = useState<Map<string, { status: 'generating' | 'done' | 'failed'; imageUrl?: string; failedStep?: string | null }>>(new Map());
 
   useEffect(() => {
     if (user) {
       fetchData();
-      fetchWeather();
     }
   }, [user]);
 
@@ -92,13 +92,21 @@ export function TodayPage() {
         .eq('worn', true)
         .order('created_at', { ascending: false })
         .limit(1),
-      supabase.from('style_preferences').select('base_photo_url').eq('user_id', user!.id).maybeSingle(),
+      supabase.from('style_preferences').select('base_photo_url, location_lat, location_lon, temp_offset_f').eq('user_id', user!.id).maybeSingle(),
     ]);
 
     if (itemsResult.data) setItems(itemsResult.data);
     if (prefsResult.data?.base_photo_url) {
       const signedUrl = await getSignedUrl(prefsResult.data.base_photo_url);
       setBasePhotoUrl(signedUrl);
+    }
+
+    const offset = prefsResult.data?.temp_offset_f ?? 0;
+    setTempOffsetF(offset);
+    if (prefsResult.data?.location_lat != null && prefsResult.data?.location_lon != null) {
+      fetchWeather(prefsResult.data.location_lat, prefsResult.data.location_lon);
+    } else {
+      setWeatherLoading(false);
     }
 
     // Fetch all past worn outfits to build combo lookup
@@ -156,9 +164,9 @@ export function TodayPage() {
     setLoading(false);
   };
 
-  const fetchWeather = async () => {
+  const fetchWeather = async (lat: number, lon: number) => {
     setWeatherLoading(true);
-    const w = await getCurrentWeather();
+    const w = await getCurrentWeather(lat, lon);
     setWeather(w);
     setWeatherHints(getWeatherRecommendation(w));
     setWeatherLoading(false);
@@ -211,6 +219,34 @@ export function TodayPage() {
     if (weather?.isHot) {
       eligibleItems = eligibleItems.filter(i => !(i.category === 'sweatshirt_jacket' && i.subcategory === 'coat'));
     }
+
+    // Weather-aware hard filter: drop items whose warmth band doesn't cover
+    // today's personally-calibrated felt temperature. This runs upstream of
+    // both recommendation passes (rule-based and AI) on the shared
+    // `eligibleItems` pool, so neither can "miss" it the way inspiration data
+    // once only reached one of the two passes. If weather is unavailable
+    // (no location set, or the fetch failed), this is skipped entirely and
+    // the existing rotation/inspiration logic runs unaffected.
+    if (weather) {
+      const feltTemp = weather.feelsLike + tempOffsetF;
+      const beforeCount = eligibleItems.length;
+      const excluded: string[] = [];
+
+      eligibleItems = eligibleItems.filter(i => {
+        if (i.warmth_min_f == null || i.warmth_max_f == null) return true; // no data - fail open
+        const fits = feltTemp >= i.warmth_min_f && feltTemp <= i.warmth_max_f;
+        if (!fits) excluded.push(`${i.primary_color} ${i.subcategory} (${i.warmth_min_f}-${i.warmth_max_f}F)`);
+        return fits;
+      });
+
+      if (excluded.length > 0) {
+        console.log(
+          `Weather filter: feltTemp=${feltTemp}F (feelsLike=${weather.feelsLike}F, offset=${tempOffsetF}F) excluded ${excluded.length}/${beforeCount} items:`,
+          excluded
+        );
+      }
+    }
+
     if (activityHints.preferComfort) {
       eligibleItems = eligibleItems.filter(i => i.formality === 'casual' || i.formality === 'smart-casual');
     }
@@ -346,7 +382,12 @@ export function TodayPage() {
           })),
           activityText: activity,
           preferences: prefs,
-          weather: weather ? { temp: weather.temp, condition: weather.condition } : null,
+          weather: weather ? {
+            temp: weather.temp,
+            condition: weather.condition,
+            feltTemp: weather.feelsLike + tempOffsetF,
+            isRainy: weather.isRainy,
+          } : null,
           inspirationProfile,
           ratingHistory,
           recentlyWornIds,

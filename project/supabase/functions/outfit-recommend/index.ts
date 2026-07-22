@@ -83,8 +83,12 @@ Deno.serve(async (req: Request) => {
       ? `Today's activity: "${activityText}"`
       : 'No specific activity planned';
 
+    // Note: weather-inappropriate items have already been hard-filtered out of
+    // `items` upstream (client-side, before either recommendation pass) based
+    // on each item's warmth band vs. today's personally-calibrated felt
+    // temperature - this context is narrative only, not a filtering signal.
     const weatherContext = weather
-      ? `Current weather: ${weather.temp}°F, ${weather.condition}`
+      ? `Current weather: ${weather.temp}°F, ${weather.condition}${weather.feltTemp != null ? ` (feels like ${weather.feltTemp}°F to this user)` : ''}${weather.isRainy ? '. Rain expected - if suggesting a SWEATSHIRT/JACKET, prefer one, and mention weather-readiness in the reason.' : ''}`
       : 'Weather unknown';
 
     // Build inspiration style profile context

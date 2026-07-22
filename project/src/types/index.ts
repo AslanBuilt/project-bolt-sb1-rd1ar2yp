@@ -21,6 +21,8 @@ export interface ClothingItem {
   created_at: string;
   ai_confidence?: number;
   ai_uncertain_fields?: string[];
+  warmth_min_f?: number | null;
+  warmth_max_f?: number | null;
 }
 
 export interface StylePreferences {

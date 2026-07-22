@@ -3,7 +3,8 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { STYLE_TAGS } from '../types';
 import { getSignedUrl, uploadBasePhoto } from '../lib/storage';
-import { Check, Loader2, Palette, Trash2, User, Upload } from 'lucide-react';
+import { geocodeLocation } from '../lib/weather';
+import { Check, Loader2, Palette, Trash2, User, Upload, MapPin, Thermometer } from 'lucide-react';
 
 const FORMALITY_LEVELS = [
   { value: 'casual', label: 'Casual' },
@@ -16,6 +17,10 @@ interface StylePreferences {
   formality_range_min: string;
   formality_range_max: string;
   base_photo_url?: string;
+  location_lat?: number | null;
+  location_lon?: number | null;
+  location_name?: string | null;
+  temp_offset_f: number;
 }
 
 export function SettingsPage() {
@@ -26,6 +31,7 @@ export function SettingsPage() {
     style_tags: [],
     formality_range_min: 'casual',
     formality_range_max: 'smart-casual',
+    temp_offset_f: 0,
   });
   const [itemCount, setItemCount] = useState(0);
   const [outfitCount, setOutfitCount] = useState(0);
@@ -33,6 +39,9 @@ export function SettingsPage() {
   const [basePhotoPreviewUrl, setBasePhotoPreviewUrl] = useState<string | null>(null);
   const [uploadingBasePhoto, setUploadingBasePhoto] = useState(false);
   const basePhotoInputRef = useRef<HTMLInputElement>(null);
+  const [locationInput, setLocationInput] = useState('');
+  const [geocodingLocation, setGeocodingLocation] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -55,6 +64,10 @@ export function SettingsPage() {
         formality_range_min: prefsResult.data.formality_range_min || 'casual',
         formality_range_max: prefsResult.data.formality_range_max || 'smart-casual',
         base_photo_url: prefsResult.data.base_photo_url || undefined,
+        location_lat: prefsResult.data.location_lat,
+        location_lon: prefsResult.data.location_lon,
+        location_name: prefsResult.data.location_name,
+        temp_offset_f: prefsResult.data.temp_offset_f ?? 0,
       });
 
       if (prefsResult.data.base_photo_url) {
@@ -93,6 +106,35 @@ export function SettingsPage() {
     }
   };
 
+  const saveLocation = async () => {
+    if (!user || !locationInput.trim()) return;
+    setGeocodingLocation(true);
+    setLocationError(null);
+
+    try {
+      const resolved = await geocodeLocation(locationInput.trim());
+      if (!resolved) {
+        setLocationError("Couldn't find that location. Try a different spelling or a nearby major city.");
+        return;
+      }
+
+      await supabase.from('style_preferences').upsert({
+        user_id: user.id,
+        location_lat: resolved.lat,
+        location_lon: resolved.lon,
+        location_name: resolved.name,
+      }, { onConflict: 'user_id' });
+
+      setPreferences((prev) => ({ ...prev, location_lat: resolved.lat, location_lon: resolved.lon, location_name: resolved.name }));
+      setLocationInput('');
+    } catch (err) {
+      console.error('Error saving location:', err);
+      setLocationError('Failed to save location. Please try again.');
+    } finally {
+      setGeocodingLocation(false);
+    }
+  };
+
   const toggleTag = (tag: string) => {
     setPreferences((prev) => ({
       ...prev,
@@ -113,6 +155,7 @@ export function SettingsPage() {
         style_tags: preferences.style_tags,
         formality_range_min: preferences.formality_range_min,
         formality_range_max: preferences.formality_range_max,
+        temp_offset_f: preferences.temp_offset_f,
       });
 
     setSaving(false);
@@ -204,6 +247,64 @@ export function SettingsPage() {
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Weather Location */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
+        <div className="flex items-center gap-2 mb-3">
+          <MapPin className="w-5 h-5 text-slate-400" />
+          <h3 className="font-medium text-slate-900">Weather Location</h3>
+        </div>
+        <p className="text-sm text-slate-500 mb-3">
+          Used to check today's forecast so recommendations skip clothes that don't match the weather.
+        </p>
+
+        {preferences.location_name && (
+          <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2 mb-3 text-sm text-slate-700">
+            <Check className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+            {preferences.location_name}
+          </div>
+        )}
+
+        <div className="flex gap-2 mb-1">
+          <input
+            type="text"
+            value={locationInput}
+            onChange={(e) => setLocationInput(e.target.value)}
+            placeholder="City name, e.g. Brooklyn, NY"
+            className="flex-1 bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm"
+          />
+          <button
+            onClick={saveLocation}
+            disabled={geocodingLocation || !locationInput.trim()}
+            className="flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 text-slate-700 font-medium px-4 py-2 rounded-lg text-sm transition-colors"
+          >
+            {geocodingLocation ? <Loader2 className="w-4 h-4 animate-spin" /> : (preferences.location_name ? 'Update' : 'Save')}
+          </button>
+        </div>
+        {locationError && <p className="text-xs text-red-600 mb-2">{locationError}</p>}
+
+        <div className="flex items-center gap-2 mt-4 mb-2">
+          <Thermometer className="w-4 h-4 text-slate-400" />
+          <p className="text-sm font-medium text-slate-700">Runs cold / runs hot</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={-10}
+            max={10}
+            step={1}
+            value={preferences.temp_offset_f}
+            onChange={(e) => setPreferences((prev) => ({ ...prev, temp_offset_f: Number(e.target.value) }))}
+            className="flex-1"
+          />
+          <span className="text-sm text-slate-600 w-16 text-right">
+            {preferences.temp_offset_f > 0 ? `+${preferences.temp_offset_f}` : preferences.temp_offset_f}°F
+          </span>
+        </div>
+        <p className="text-xs text-slate-400 mt-1">
+          Shifts how every recommendation reads the weather - positive if you tend to run cold, negative if you run hot. Saved with "Save Preferences" below.
+        </p>
       </div>
 
       {/* Style Tags */}

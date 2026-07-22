@@ -4,9 +4,16 @@ export interface WeatherData {
   condition: string;
   humidity: number;
   windSpeed: number;
+  precipitationProbability: number | null;
   isCold: boolean;
   isHot: boolean;
   isRainy: boolean;
+}
+
+export interface GeocodedLocation {
+  lat: number;
+  lon: number;
+  name: string;
 }
 
 const WMO_CODE_MAP: Record<number, string> = {
@@ -40,31 +47,50 @@ const WMO_CODE_MAP: Record<number, string> = {
   99: 'Thunderstorm with heavy hail',
 };
 
-export async function getCurrentWeather(): Promise<WeatherData | null> {
+/**
+ * Resolve a free-typed city name to coordinates using Open-Meteo's free
+ * geocoding API (no key needed, same provider as the forecast itself).
+ * Resolved once and stored - not called on every recommendation.
+ */
+export async function geocodeLocation(query: string): Promise<GeocodedLocation | null> {
   try {
-    // Get user's location
-    const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-      navigator.geolocation.getCurrentPosition(resolve, reject, {
-        enableHighAccuracy: false,
-        timeout: 5000,
-        maximumAge: 600000, // 10 minute cache
-      });
-    });
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=1&language=en&format=json`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Geocoding API failed');
 
-    const { latitude, longitude } = position.coords;
+    const data = await response.json();
+    const result = data.results?.[0];
+    if (!result) return null;
 
-    // Use Open-Meteo (free, no API key needed)
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&temperature_unit=fahrenheit`;
+    const nameParts = [result.name, result.admin1, result.country].filter(Boolean);
+    return { lat: result.latitude, lon: result.longitude, name: nameParts.join(', ') };
+  } catch (error) {
+    console.error('Geocoding failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Fetch today's forecast for a stored lat/lon (not live browser geolocation -
+ * the location is resolved once via geocodeLocation() and saved in Settings,
+ * so this works reliably without a permission prompt every time).
+ */
+export async function getCurrentWeather(lat: number, lon: number): Promise<WeatherData | null> {
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&daily=precipitation_probability_max&temperature_unit=fahrenheit&timezone=auto`;
 
     const response = await fetch(url);
     if (!response.ok) throw new Error('Weather API failed');
 
     const data = await response.json();
     const current = data.current;
+    const precipitationProbability: number | null = data.daily?.precipitation_probability_max?.[0] ?? null;
 
     const temp = Math.round(current.temperature_2m);
     const feelsLike = Math.round(current.apparent_temperature);
     const condition = WMO_CODE_MAP[current.weather_code] || 'Unknown';
+
+    const rainyByCode = [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99].includes(current.weather_code);
 
     return {
       temp,
@@ -72,9 +98,12 @@ export async function getCurrentWeather(): Promise<WeatherData | null> {
       condition,
       humidity: current.relative_humidity_2m,
       windSpeed: Math.round(current.wind_speed_10m),
+      precipitationProbability,
       isCold: feelsLike < 50,
       isHot: feelsLike > 82,
-      isRainy: [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99].includes(current.weather_code),
+      // Prefer the explicit daily precipitation probability (spec's >50% threshold)
+      // when available; fall back to the WMO weather-code check otherwise.
+      isRainy: precipitationProbability !== null ? precipitationProbability > 50 : rainyByCode,
     };
   } catch (error) {
     console.error('Weather fetch failed:', error);
