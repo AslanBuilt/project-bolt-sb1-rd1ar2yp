@@ -456,34 +456,40 @@ export function TodayPage() {
   // Starts (or resumes watching) background generation for a specific item
   // combination, keyed independent of any outfits row - so it can begin the
   // moment a candidate is shown, before the user has committed to wearing it.
-  const ensureTryOn = async (outfitItems: ClothingItem[]) => {
+  // `force` bypasses the "already done" short-circuit entirely - needed for
+  // manual regeneration, since caching is permanent-per-combo and a bad
+  // stochastic result (pipeline reports success, image is just wrong) never
+  // self-heals the way a crash/quota failure does.
+  const ensureTryOn = async (outfitItems: ClothingItem[], force = false) => {
     if (!user || !basePhotoUrl) return;
 
     const stepItems = getTryOnStepItems(outfitItems);
     if (stepItems.length === 0) return;
     const comboKey = getComboKey(stepItems);
 
-    const existingLocal = tryOnResults.get(comboKey);
-    if (existingLocal?.status === 'generating' || existingLocal?.status === 'done') return;
+    if (!force) {
+      const existingLocal = tryOnResults.get(comboKey);
+      if (existingLocal?.status === 'generating' || existingLocal?.status === 'done') return;
 
-    const { data: existingRow } = await supabase
-      .from('tryon_results')
-      .select('status, image_url, failed_step, updated_at')
-      .eq('user_id', user.id)
-      .eq('combo_key', comboKey)
-      .maybeSingle();
+      const { data: existingRow } = await supabase
+        .from('tryon_results')
+        .select('status, image_url, failed_step, updated_at')
+        .eq('user_id', user.id)
+        .eq('combo_key', comboKey)
+        .maybeSingle();
 
-    const isStale = existingRow?.status === 'generating' &&
-      Date.now() - new Date(existingRow.updated_at).getTime() > 2 * 60 * 1000;
+      const isStale = existingRow?.status === 'generating' &&
+        Date.now() - new Date(existingRow.updated_at).getTime() > 2 * 60 * 1000;
 
-    if (existingRow && existingRow.status !== 'failed' && !isStale) {
-      if (existingRow.status === 'done' && existingRow.image_url) {
-        const signedUrl = await getSignedUrl(existingRow.image_url);
-        setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl, failedStep: existingRow.failed_step }));
-      } else {
-        setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'generating' }));
+      if (existingRow && existingRow.status !== 'failed' && !isStale) {
+        if (existingRow.status === 'done' && existingRow.image_url) {
+          const signedUrl = await getSignedUrl(existingRow.image_url);
+          setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'done', imageUrl: signedUrl, failedStep: existingRow.failed_step }));
+        } else {
+          setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'generating' }));
+        }
+        return;
       }
-      return;
     }
 
     setTryOnResults(prev => new Map(prev).set(comboKey, { status: 'generating' }));
@@ -800,14 +806,23 @@ export function TodayPage() {
 
           {currentTryOnStatus === 'done' && tryOnResults.get(currentComboKey!)?.imageUrl && (
             <div className="mb-3">
-              <div className="rounded-lg overflow-hidden bg-slate-100 aspect-[3/4] max-h-96">
+              <div className="relative rounded-lg overflow-hidden bg-slate-100 aspect-[3/4] max-h-96">
                 <img src={tryOnResults.get(currentComboKey!)?.imageUrl} alt="Today's outfit on you" className="w-full h-full object-contain" />
               </div>
-              {tryOnResults.get(currentComboKey!)?.failedStep && (
-                <p className="text-xs text-amber-600 mt-1">
-                  Couldn't update the {tryOnResults.get(currentComboKey!)?.failedStep} in this visualization — showing the rest as generated.
+              <div className="flex items-center justify-between mt-1.5">
+                <p className="text-xs text-slate-400">
+                  {tryOnResults.get(currentComboKey!)?.failedStep
+                    ? `Couldn't update the ${tryOnResults.get(currentComboKey!)?.failedStep} in this visualization — showing the rest as generated.`
+                    : "Doesn't look right? A successful status doesn't guarantee an accurate image."}
                 </p>
-              )}
+                <button
+                  onClick={() => savedOutfit?.items && ensureTryOn(savedOutfit.items, true)}
+                  className="flex-shrink-0 flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 px-2.5 py-1.5 rounded-lg transition-colors ml-2"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Regenerate
+                </button>
+              </div>
             </div>
           )}
 
