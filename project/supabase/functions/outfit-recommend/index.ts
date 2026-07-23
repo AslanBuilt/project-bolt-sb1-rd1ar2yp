@@ -50,6 +50,7 @@ Deno.serve(async (req: Request) => {
   try {
     const { items, activityText, preferences, weather, inspirationProfile, ratingHistory, recentlyWornIds } = await req.json();
     const wornRecentlyIds: string[] = recentlyWornIds || [];
+    console.log(`outfit-recommend: received activityText="${activityText}" itemCount=${items?.length}`);
 
     if (!items || items.length < 3) {
       return new Response(
@@ -188,6 +189,8 @@ Respond with ONLY a JSON array (no markdown, no explanation):
   ...
 ]`;
 
+    console.log(`outfit-recommend: full prompt sent to Gemini:\n${prompt}`);
+
     const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,      {
         method: 'POST',
@@ -196,7 +199,9 @@ Respond with ONLY a JSON array (no markdown, no explanation):
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.7,
-          maxOutputTokens: 2048,          }
+            maxOutputTokens: 4096,
+            thinkingConfig: { thinkingBudget: 0 },
+          }
         })
       }
     );
@@ -238,22 +243,36 @@ Respond with ONLY a JSON array (no markdown, no explanation):
       );
     }
 
+    console.log(`outfit-recommend: Gemini returned ${recommendations.length} raw suggestions:`, JSON.stringify(recommendations));
+
     // Validate recommendations
     const validRecommendations = recommendations.filter(rec => {
       const outfitItems = items.filter((i: ClothingItem) => rec.itemIds?.includes(i.id));
-      if (outfitItems.length < 2) return false;
+      if (outfitItems.length < 2) {
+        console.log(`outfit-recommend: dropped suggestion (< 2 matched items):`, rec.itemIds);
+        return false;
+      }
 
       // Must have shoes
       const hasShoes = outfitItems.some((i: ClothingItem) => i.category === 'shoes');
-      if (!hasShoes) return false;
+      if (!hasShoes) {
+        console.log(`outfit-recommend: dropped suggestion (no shoes):`, rec.itemIds);
+        return false;
+      }
 
       // Must have a shirt plus pants or shorts
       const hasShirt = outfitItems.some((i: ClothingItem) => i.category === 'shirts');
       const hasPants = outfitItems.some((i: ClothingItem) => i.category === 'pants');
       const hasShorts = outfitItems.some((i: ClothingItem) => i.category === 'shorts');
 
-      return hasShirt && (hasPants || hasShorts);
+      if (!(hasShirt && (hasPants || hasShorts))) {
+        console.log(`outfit-recommend: dropped suggestion (missing shirt+bottom):`, rec.itemIds);
+        return false;
+      }
+      return true;
     });
+
+    console.log(`outfit-recommend: ${validRecommendations.length}/${recommendations.length} suggestions passed validation`);
 
     return new Response(
       JSON.stringify({
