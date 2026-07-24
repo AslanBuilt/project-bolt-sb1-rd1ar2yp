@@ -439,16 +439,17 @@ export function TodayPage() {
     setGenerating(false);
   };
 
-  // CatVTON/IDM-VTON take one garment per body region per call. If both a
-  // base layer (shirts) and an outer layer (sweatshirt_jacket) are present,
-  // only the visible outer layer is sent for the "upper" step. Shoes/accessories
-  // are never included - neither model supports those categories.
+  // If both a base layer (shirts) and an outer layer (sweatshirt_jacket) are
+  // present, only the visible outer layer is sent for the "upper" step.
+  // Shoes are included too - unlike the old CatVTON/IDM-VTON chain, Gemini's
+  // image model isn't restricted to a single upper/lower cloth_type param.
   const getTryOnStepItems = (outfitItems: ClothingItem[]): ClothingItem[] => {
     const upperItem =
       outfitItems.find(i => i.category === 'sweatshirt_jacket') ||
       outfitItems.find(i => i.category === 'shirts');
     const lowerItem = outfitItems.find(i => i.category === 'pants' || i.category === 'shorts');
-    return [upperItem, lowerItem].filter((i): i is ClothingItem => Boolean(i));
+    const shoesItem = outfitItems.find(i => i.category === 'shoes');
+    return [upperItem, lowerItem, shoesItem].filter((i): i is ClothingItem => Boolean(i));
   };
 
   const getComboKey = (stepItems: ClothingItem[]): string => stepItems.map(i => i.id).sort().join('-');
@@ -505,7 +506,10 @@ export function TodayPage() {
       const urlMap = await getSignedUrls(photoPaths);
 
       const steps = stepItems.map(i => ({
-        category: i.category === 'sweatshirt_jacket' || i.category === 'shirts' ? 'upper' : 'lower',
+        category:
+          i.category === 'sweatshirt_jacket' || i.category === 'shirts' ? 'upper'
+          : i.category === 'shoes' ? 'shoes'
+          : 'lower',
         photoUrl: urlMap.get(i.photo_url) || i.photo_url,
         description: `${i.primary_color} ${i.subcategory}`.trim(),
       }));

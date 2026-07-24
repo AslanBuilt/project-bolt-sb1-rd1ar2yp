@@ -1,6 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { Client, handle_file } from "npm:@gradio/client@1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,13 +7,10 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
-// CatVTON and IDM-VTON are garment try-on models: they only understand
-// upper-body / lower-body clothing, not shoes or accessories. Any step
-// outside this set is skipped rather than sent to the model.
-type SupportedCategory = "upper" | "lower";
+const GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image";
 
 interface StepInput {
-  category: string;
+  category: string; // 'upper' | 'lower' | 'shoes'
   photoUrl: string;
   description?: string;
 }
@@ -33,107 +29,95 @@ function json(body: unknown, status: number) {
   });
 }
 
-function isSupportedCategory(category: string): category is SupportedCategory {
-  return category === "upper" || category === "lower";
-}
-
-async function fetchAsBlob(url: string, label: string): Promise<Blob> {
+async function fetchAsInlineImage(url: string, label: string): Promise<{ data: string; mimeType: string }> {
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Failed to fetch ${label} (HTTP ${res.status})`);
   }
-  return await res.blob();
-}
+  const buffer = new Uint8Array(await res.arrayBuffer());
+  const mimeType = res.headers.get("content-type") || "image/jpeg";
 
-// Gradio image-output results can come back in a few shapes depending on
-// client/space version: a Blob directly, a FileData object with .url or
-// .path, or a bare URL string. Handle all of them defensively.
-async function extractResultBlob(result: { data?: unknown[] }, spaceHost: string, logPrefix: string): Promise<Blob> {
-  console.log(`${logPrefix} raw predict() result:`, JSON.stringify(result).slice(0, 1000));
-
-  const data = result?.data?.[0] as
-    | Blob
-    | string
-    | { url?: string; path?: string }
-    | undefined;
-
-  if (!data) throw new Error("No result data returned from Space");
-  if (data instanceof Blob) return data;
-  if (typeof data === "string") return await fetchAsBlob(data, "result (string url)");
-  if (data.url) return await fetchAsBlob(data.url, "result (.url)");
-  if (data.path) {
-    const path = data.path.startsWith("/") ? data.path : `/${data.path}`;
-    return await fetchAsBlob(`https://${spaceHost}/file=${path}`, "result (.path)");
+  // Chunked to avoid "Maximum call stack size exceeded" from spreading a large
+  // typed array directly into String.fromCharCode (garment/base photos can be
+  // several MB).
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < buffer.length; i += chunkSize) {
+    binary += String.fromCharCode(...buffer.subarray(i, i + chunkSize));
   }
-  throw new Error(`Could not extract image from result: ${JSON.stringify(data).slice(0, 200)}`);
+
+  return { data: btoa(binary), mimeType };
 }
 
-async function callCatVTON(
-  personBlob: Blob,
-  garmentBlob: Blob,
-  clothType: SupportedCategory,
-  hfToken: string,
+async function generateTryOnImage(
+  basePhotoUrl: string,
+  steps: StepInput[],
+  apiKey: string,
   logPrefix: string
 ): Promise<Blob> {
-  console.log(`${logPrefix} calling CatVTON: personBlob=${personBlob.size}B garmentBlob=${garmentBlob.size}B clothType=${clothType}`);
-  const client = await Client.connect("zhengchong/CatVTON", { hf_token: hfToken as `hf_${string}` });
-  const result = await client.predict("/submit_function", [
-    { background: handle_file(personBlob), layers: [], composite: null },
-    handle_file(garmentBlob),
-    clothType,
-    30, // inference steps (default is 50; lowered for speed on a free ZeroGPU quota)
-    2.5, // CFG strength (Space default)
-    -1, // seed (-1 = random)
-    "result only",
-  ]);
-  return await extractResultBlob(result, "zhengchong-catvton.hf.space", logPrefix);
-}
+  const baseImage = await fetchAsInlineImage(basePhotoUrl, "base photo");
+  console.log(`${logPrefix} base photo fetched, mimeType=${baseImage.mimeType}`);
 
-async function callIdmVton(
-  personBlob: Blob,
-  garmentBlob: Blob,
-  category: SupportedCategory,
-  description: string,
-  hfToken: string,
-  logPrefix: string
-): Promise<Blob> {
-  console.log(`${logPrefix} calling IDM-VTON: personBlob=${personBlob.size}B garmentBlob=${garmentBlob.size}B category=${category} description="${description}"`);
-  const client = await Client.connect("yisol/IDM-VTON", { hf_token: hfToken as `hf_${string}` });
-  const result = await client.predict("/tryon", [
-    { background: handle_file(personBlob), layers: [], composite: null },
-    handle_file(garmentBlob),
-    description,
-    true, // use auto-generated mask
-    false, // use auto-crop & resizing
-    30, // denoising steps
-    42, // seed
-  ]);
-  return await extractResultBlob(result, "yisol-idm-vton.hf.space", logPrefix);
-}
+  const garmentImages: { data: string; mimeType: string; category: string; description: string }[] = [];
+  for (const step of steps) {
+    const image = await fetchAsInlineImage(step.photoUrl, `${step.category} garment photo`);
+    const description = step.description?.trim() || step.category;
+    garmentImages.push({ ...image, category: step.category, description });
+    console.log(`${logPrefix} fetched ${step.category} garment: "${description}" mimeType=${image.mimeType}`);
+  }
 
-async function tryStep(
-  model: "catvton" | "idm-vton",
-  personBlob: Blob,
-  garmentBlob: Blob,
-  category: SupportedCategory,
-  description: string,
-  hfToken: string,
-  logPrefix: string,
-  maxAttempts: number
-): Promise<Blob | null> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return model === "catvton"
-        ? await callCatVTON(personBlob, garmentBlob, category, hfToken, logPrefix)
-        : await callIdmVton(personBlob, garmentBlob, category, description, hfToken, logPrefix);
-    } catch (err) {
-      console.error(`${logPrefix} ${model} attempt ${attempt}/${maxAttempts} failed for category=${category}:`, err);
-      if (attempt < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-      }
+  const garmentList = garmentImages
+    .map((g, i) => `image ${i + 2}: ${g.description} (${g.category} garment)`)
+    .join(", ");
+
+  const prompt =
+    `You are given a photo of a person (image 1) and ${garmentImages.length} garment reference photo(s): ${garmentList}. ` +
+    `Generate a new photorealistic image of the SAME person from image 1, in the same pose, framing, and background, ` +
+    `but now wearing all of the garments shown in the other reference images together as a single coordinated outfit. ` +
+    `Preserve the person's face, identity, body shape, and the background exactly as in image 1. ` +
+    `Match each garment's color, pattern, and style as closely as possible to its reference photo. ` +
+    `If a garment category (e.g. shoes) isn't included in the reference images, leave that part of the person's outfit unchanged from image 1.`;
+
+  const parts: Record<string, unknown>[] = [
+    { text: prompt },
+    { inlineData: { mimeType: baseImage.mimeType, data: baseImage.data } },
+    ...garmentImages.map((g) => ({ inlineData: { mimeType: g.mimeType, data: g.data } })),
+  ];
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+      }),
     }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error(`${logPrefix} Gemini image API error (HTTP ${response.status}):`, errText.slice(0, 1000));
+    throw new Error(`GEMINI_HTTP_${response.status}: ${errText.slice(0, 300)}`);
   }
-  return null;
+
+  const result = await response.json();
+  const candidate = result?.candidates?.[0];
+  console.log(`${logPrefix} Gemini response finishReason=${candidate?.finishReason}`);
+
+  const resultParts: { text?: string; inlineData?: { mimeType?: string; data?: string } }[] =
+    candidate?.content?.parts || [];
+  const imagePart = resultParts.find((p) => p.inlineData?.data);
+
+  if (!imagePart?.inlineData?.data) {
+    const textPart = resultParts.find((p) => p.text)?.text;
+    console.error(`${logPrefix} no image in Gemini response. finishReason=${candidate?.finishReason} text="${textPart?.slice(0, 300)}"`);
+    throw new Error("GEMINI_NO_IMAGE");
+  }
+
+  const bytes = Uint8Array.from(atob(imagePart.inlineData.data), (c) => c.charCodeAt(0));
+  return new Blob([bytes], { type: imagePart.inlineData.mimeType || "image/png" });
 }
 
 Deno.serve(async (req: Request) => {
@@ -144,7 +128,7 @@ Deno.serve(async (req: Request) => {
   try {
     const { userId, comboKey, basePhotoUrl, steps } = (await req.json()) as TryOnRequest;
 
-    if (!userId || !comboKey || !basePhotoUrl || !Array.isArray(steps)) {
+    if (!userId || !comboKey || !basePhotoUrl || !Array.isArray(steps) || steps.length === 0) {
       return json({ success: false, error: "Missing required fields" }, 400);
     }
 
@@ -156,12 +140,7 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    async function markResult(patch: {
-      status: "done" | "failed";
-      image_url?: string;
-      failed_step?: string | null;
-      skipped?: string[];
-    }) {
+    async function markResult(patch: { status: "done" | "failed"; image_url?: string }) {
       const { error } = await supabaseAdmin
         .from("tryon_results")
         .upsert(
@@ -170,8 +149,8 @@ Deno.serve(async (req: Request) => {
             combo_key: comboKey,
             status: patch.status,
             image_url: patch.image_url ?? null,
-            failed_step: patch.failed_step ?? null,
-            skipped: patch.skipped ?? [],
+            failed_step: null,
+            skipped: [],
             updated_at: new Date().toISOString(),
           },
           { onConflict: "user_id,combo_key" }
@@ -181,133 +160,70 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const hfToken = Deno.env.get("HF_TOKEN");
-    if (!hfToken) {
-      await markResult({ status: "failed", failed_step: null });
-      return json({ success: false, error: "HF_TOKEN not configured" }, 500);
+    // Separate paid key, used only by this function - ai-tag-item,
+    // analyze-inspiration, and outfit-recommend keep using GEMINI_API_KEY
+    // (free tier) untouched.
+    const apiKey = Deno.env.get("GEMINI_IMAGE_API_KEY");
+    if (!apiKey) {
+      await markResult({ status: "failed" });
+      return json({ success: false, error: "GEMINI_IMAGE_API_KEY not configured" }, 500);
     }
 
-    const supportedSteps = steps.filter((s) => isSupportedCategory(s.category)) as (StepInput & {
-      category: SupportedCategory;
-    })[];
-    const skipped = steps.filter((s) => !isSupportedCategory(s.category)).map((s) => s.category);
+    const logPrefix = `outfit-tryon[${comboKey}]`;
+    console.log(`${logPrefix} basePhotoUrl=${basePhotoUrl}`);
+    console.log(`${logPrefix} steps received:`, JSON.stringify(steps));
 
-    if (skipped.length > 0) {
-      console.log(`outfit-tryon[${comboKey}] skipping unsupported categories:`, skipped);
-    }
+    let resultBlob: Blob;
+    try {
+      resultBlob = await generateTryOnImage(basePhotoUrl, steps, apiKey, logPrefix);
+    } catch (err) {
+      const message = String((err as Error)?.message || err);
+      console.error(`${logPrefix} generation failed:`, message);
+      await markResult({ status: "failed" });
 
-    if (supportedSteps.length === 0) {
-      await markResult({ status: "failed", failed_step: null, skipped });
+      // The $10 prepaid balance stops serving requests immediately when it
+      // hits $0 - Gemini surfaces that as a 429 (RESOURCE_EXHAUSTED) or 403
+      // (billing/permission denied), same shape as a rate-limit error. Give a
+      // clearer message for that case instead of a generic failure. This exact
+      // detection hasn't been exercised against a real drained balance (that
+      // would mean deliberately spending the $10 down to $0 to test it) - if
+      // Google's actual error shape differs, this falls through to the
+      // generic message below, which is still accurate and non-crashing.
+      const lower = message.toLowerCase();
+      const isBillingIssue =
+        message.includes("GEMINI_HTTP_429") ||
+        message.includes("GEMINI_HTTP_403") ||
+        lower.includes("quota") ||
+        lower.includes("billing") ||
+        lower.includes("resource_exhausted");
+
       return json(
-        { success: false, error: "No supported garment categories (upper/lower) in this outfit", skipped },
+        {
+          success: false,
+          error: isBillingIssue
+            ? "Try-on is temporarily unavailable (image generation quota/billing limit reached). Please try again later."
+            : "Try-on generation failed.",
+        },
         200
       );
     }
 
-    const logPrefixBase = `outfit-tryon[${comboKey}]`;
-    console.log(`${logPrefixBase} basePhotoUrl=${basePhotoUrl}`);
-    console.log(`${logPrefixBase} steps received:`, JSON.stringify(steps));
-
-    let currentImageBlob: Blob;
-    try {
-      currentImageBlob = await fetchAsBlob(basePhotoUrl, "base photo");
-      console.log(`${logPrefixBase} base photo fetched: ${currentImageBlob.size} bytes`);
-    } catch (err) {
-      console.error(`${logPrefixBase} failed to fetch base photo:`, err);
-      await markResult({ status: "failed", failed_step: null, skipped });
-      return json({ success: false, error: "Could not load base photo", skipped }, 200);
-    }
-
-    const stepsCompleted: string[] = [];
-    let modelUsed: "catvton" | "idm-vton" | null = null;
-    let failedStep: string | null = null;
-
-    for (const step of supportedSteps) {
-      const logPrefix = logPrefixBase;
-      console.log(`${logPrefix} step category=${step.category} photoUrl=${step.photoUrl}`);
-      let garmentBlob: Blob;
-      try {
-        garmentBlob = await fetchAsBlob(step.photoUrl, `${step.category} garment photo`);
-        console.log(`${logPrefix} garment photo fetched for ${step.category}: ${garmentBlob.size} bytes`);
-      } catch (err) {
-        console.error(`${logPrefix} failed to fetch garment photo for ${step.category}:`, err);
-        failedStep = step.category;
-        break;
-      }
-
-      const description = step.description?.trim() || (step.category === "upper" ? "top garment" : "bottom garment");
-
-      // CatVTON is currently disabled entirely: live diagnostics show a 0%
-      // success rate across every logged attempt today (server-side
-      // "IndexError" crashes or ZeroGPU quota rejections), and every failed
-      // attempt still burns real ZeroGPU quota that the later chained step
-      // (lower) then needs. Calling a model with a proven 0% success rate is
-      // pure waste here - re-enable if the Space stabilizes.
-      const CATVTON_ENABLED = false;
-      let stepResult: Blob | null = null;
-      let stepModel: "catvton" | "idm-vton" = "idm-vton";
-
-      if (CATVTON_ENABLED) {
-        stepResult = await tryStep("catvton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 1);
-        stepModel = "catvton";
-      }
-
-      if (!stepResult) {
-        // Single attempt, not retried: logs show a retry has never once
-        // recovered from a first-attempt failure today (the identical error
-        // - usually quota exhaustion - just recurs seconds later). Retrying
-        // only spends more of the scarce shared quota for no observed benefit.
-        stepResult = await tryStep("idm-vton", currentImageBlob, garmentBlob, step.category, description, hfToken, logPrefix, 1);
-        stepModel = "idm-vton";
-      }
-
-      if (!stepResult) {
-        console.error(`${logPrefix} both CatVTON and IDM-VTON failed for category=${step.category}`);
-        failedStep = step.category;
-        break;
-      }
-
-      console.log(`${logPrefix} step ${step.category} succeeded via ${stepModel}, result size=${stepResult.size} bytes`);
-      currentImageBlob = stepResult;
-      modelUsed = modelUsed ?? stepModel;
-      stepsCompleted.push(step.category);
-    }
-
-    if (stepsCompleted.length === 0) {
-      await markResult({ status: "failed", failed_step: failedStep, skipped });
-      return json({ success: false, error: "Try-on generation failed", failedStep, skipped }, 200);
-    }
-
-    const path = `${userId}/generated/${comboKey}.jpg`;
-    const arrayBuffer = await currentImageBlob.arrayBuffer();
+    const path = `${userId}/generated/${comboKey}.png`;
+    const arrayBuffer = await resultBlob.arrayBuffer();
     const { error: uploadError } = await supabaseAdmin.storage
       .from("clothing-photos")
-      .upload(path, arrayBuffer, { contentType: "image/jpeg", upsert: true });
+      .upload(path, arrayBuffer, { contentType: resultBlob.type || "image/png", upsert: true });
 
     if (uploadError) {
-      console.error(`${logPrefixBase} storage upload failed:`, uploadError);
-      await markResult({ status: "failed", failed_step: failedStep, skipped });
-      return json({ success: false, error: "Failed to store generated image", stepsCompleted, skipped }, 200);
+      console.error(`${logPrefix} storage upload failed:`, uploadError);
+      await markResult({ status: "failed" });
+      return json({ success: false, error: "Failed to store generated image" }, 200);
     }
 
-    console.log(`${logPrefixBase} success: path=${path} stepsCompleted=${stepsCompleted.join(",")} modelUsed=${modelUsed}`);
+    console.log(`${logPrefix} success: path=${path}`);
+    await markResult({ status: "done", image_url: path });
 
-    // A partial result (e.g. upper succeeded, lower failed) is still marked "done" —
-    // a partially-dressed visualization is better than none, matching the fallback philosophy.
-    await markResult({ status: "done", image_url: path, failed_step: failedStep, skipped });
-
-    return json(
-      {
-        success: true,
-        path,
-        stepsCompleted,
-        skipped,
-        partial: failedStep !== null,
-        failedStep,
-        modelUsed,
-      },
-      200
-    );
+    return json({ success: true, path }, 200);
   } catch (err) {
     console.error("outfit-tryon: unhandled error:", err);
     return json({ success: false, error: String((err as Error)?.message || err) }, 500);
