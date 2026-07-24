@@ -76,6 +76,7 @@ async function generateTryOnImage(
     `but now wearing all of the garments shown in the other reference images together as a single coordinated outfit. ` +
     `Preserve the person's face, identity, body shape, and the background exactly as in image 1. ` +
     `Match each garment's color, pattern, and style as closely as possible to its reference photo. ` +
+    `Do not crop, zoom in, or reframe the shot: keep the exact same full-body framing as image 1, with the person's entire body visible from head to feet, including their shoes/footwear fully in frame. ` +
     `If a garment category (e.g. shoes) isn't included in the reference images, leave that part of the person's outfit unchanged from image 1.`;
 
   const parts: Record<string, unknown>[] = [
