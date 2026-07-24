@@ -28,9 +28,20 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    // Moved to the paid key (2026-07-24) to get off the free tier's shared
+    // 20 req/day cap. The paid project's key can't call gemini-2.5-flash for
+    // text at all (live 404: "no longer available to new users" - a
+    // project-specific restriction, confirmed via a real call, not a general
+    // model deprecation), so the model changes along with the key. To revert
+    // this function to the free tier, change BOTH constants back:
+    // GEMINI_KEY_SECRET -> "GEMINI_API_KEY", GEMINI_MODEL -> "gemini-2.5-flash".
+    // See CLAUDE.md "Gemini API key routing".
+    const GEMINI_KEY_SECRET = "GEMINI_PAID_API_KEY";
+    const GEMINI_MODEL = "gemini-3.5-flash";
+    const geminiApiKey = Deno.env.get(GEMINI_KEY_SECRET);
+    console.log(`analyze-inspiration: using Gemini key from secret "${GEMINI_KEY_SECRET}", model "${GEMINI_MODEL}"`);
     if (!geminiApiKey) {
-      console.error('analyze-inspiration: GEMINI_API_KEY env var is not set');
+      console.error(`analyze-inspiration: ${GEMINI_KEY_SECRET} env var is not set`);
       return new Response(
         JSON.stringify({ error: "Gemini API key not configured" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -99,7 +110,7 @@ Guidelines:
 - Always return a valid JSON object, even if some fields are sparse.`;
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${geminiApiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -125,6 +136,23 @@ Guidelines:
       const errorText = await response.text();
       console.error('analyze-inspiration: Gemini API returned non-OK status:', response.status, response.statusText);
       console.error('analyze-inspiration: Gemini error body:', errorText);
+
+      // The $10 prepaid balance stops serving requests immediately at $0 -
+      // this hasn't been exercised against a real drained balance, but
+      // Gemini's documented error shapes for that case are a 429/403 with
+      // "billing"/"quota" language, distinct from an ordinary transient
+      // per-minute rate limit (which still has a "retry in Ns" hint).
+      const lowerError = errorText.toLowerCase();
+      const isBillingIssue = response.status === 403 || (response.status === 429 && lowerError.includes('billing'));
+      if (isBillingIssue) {
+        return new Response(
+          JSON.stringify({
+            error: "Inspiration analysis is temporarily unavailable (Gemini quota/billing limit reached). Please try again later.",
+            billingIssue: true,
+          }),
+          { status: response.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
       if (response.status === 429) {
         const retryMatch = errorText.match(/retry in (\d+(?:\.\d+)?)s/i);

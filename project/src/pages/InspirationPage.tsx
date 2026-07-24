@@ -46,11 +46,16 @@ async function analyzeInspirationImage(base64: string): Promise<{ analysis?: Ana
       body: JSON.stringify({ imageBase64: base64 }),
     });
 
-    if (response.status === 429) {
-      const { retryAfter } = await response.json().catch(() => ({ retryAfter: 15 }));
-      if (attempt === 0) {
+    if (response.status === 429 || response.status === 403) {
+      const body = await response.json().catch(() => ({ retryAfter: 15 }));
+      if (body.billingIssue) {
+        // Balance is at $0 - waiting and retrying won't help, unlike an
+        // ordinary transient per-minute rate limit below.
+        return { error: body.error, detail: 'Gemini quota/billing limit reached.' };
+      }
+      if (response.status === 429 && attempt === 0) {
         // Gemini free-tier rate limit hit - wait out the window it told us, then try once more
-        await new Promise(resolve => setTimeout(resolve, (retryAfter || 15) * 1000));
+        await new Promise(resolve => setTimeout(resolve, (body.retryAfter || 15) * 1000));
         continue;
       }
       return { error: 'Rate limited', detail: 'Still rate limited after waiting - try again in a minute.' };

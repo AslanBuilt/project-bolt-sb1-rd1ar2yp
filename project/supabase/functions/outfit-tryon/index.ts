@@ -160,13 +160,16 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Separate paid key, used only by this function - ai-tag-item,
-    // analyze-inspiration, and outfit-recommend keep using GEMINI_API_KEY
-    // (free tier) untouched.
-    const apiKey = Deno.env.get("GEMINI_IMAGE_API_KEY");
+    // Image generation isn't available on Gemini's free tier at all, so this
+    // one always uses the paid key - unlike the text functions (ai-tag-item,
+    // analyze-inspiration, outfit-recommend), there's no "revert to free" case
+    // for this constant. See CLAUDE.md "Gemini API key routing".
+    const GEMINI_KEY_SECRET = "GEMINI_PAID_API_KEY";
+    const apiKey = Deno.env.get(GEMINI_KEY_SECRET);
+    console.log(`outfit-tryon[${comboKey}] using Gemini key from secret "${GEMINI_KEY_SECRET}"`);
     if (!apiKey) {
       await markResult({ status: "failed" });
-      return json({ success: false, error: "GEMINI_IMAGE_API_KEY not configured" }, 500);
+      return json({ success: false, error: `${GEMINI_KEY_SECRET} not configured` }, 500);
     }
 
     const logPrefix = `outfit-tryon[${comboKey}]`;

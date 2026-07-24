@@ -39,7 +39,18 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    // Moved to the paid key (2026-07-24) to get off the free tier's shared
+    // 20 req/day cap. The paid project's key can't call gemini-2.5-flash for
+    // text at all (live 404: "no longer available to new users" - a
+    // project-specific restriction, confirmed via a real call, not a general
+    // model deprecation), so the model changes along with the key. To revert
+    // this function to the free tier, change BOTH constants back:
+    // GEMINI_KEY_SECRET -> "GEMINI_API_KEY", GEMINI_MODEL -> "gemini-2.5-flash".
+    // See CLAUDE.md "Gemini API key routing".
+    const GEMINI_KEY_SECRET = "GEMINI_PAID_API_KEY";
+    const GEMINI_MODEL = "gemini-3.5-flash";
+    const geminiApiKey = Deno.env.get(GEMINI_KEY_SECRET);
+    console.log(`ai-tag-item: using Gemini key from secret "${GEMINI_KEY_SECRET}", model "${GEMINI_MODEL}"`);
     if (!geminiApiKey) {
       return new Response(
         JSON.stringify({ error: "Gemini API key not configured" }),
@@ -62,7 +73,16 @@ Deno.serve(async (req: Request) => {
       const imageResponse = await fetch(imageUrl);
       const imageBuffer = await imageResponse.arrayBuffer();
       const mimeType = imageResponse.headers.get('content-type') || 'image/jpeg';
-      const base64 = btoa(String.fromCharCode(...new Uint8Array(imageBuffer)));
+      // Chunked to avoid "Maximum call stack size exceeded" from spreading a
+      // large typed array directly into String.fromCharCode (found live
+      // during this change's verification - garment photos can be several MB).
+      const bytes = new Uint8Array(imageBuffer);
+      let binary = '';
+      const chunkSize = 8192;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      }
+      const base64 = btoa(binary);
       imagePart = {
         inlineData: { mimeType, data: base64 }
       };
@@ -108,7 +128,7 @@ Guidelines:
 - Formality: casual = everyday wear, smart-casual = office/nice restaurant, formal = business/special occasions`;
 
     const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,      {
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${geminiApiKey}`,      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -132,6 +152,23 @@ Guidelines:
     if (!response.ok) {
       const error = await response.text();
       console.error('Gemini API error:', error);
+
+      // The $10 prepaid balance stops serving requests immediately at $0 -
+      // this hasn't been exercised against a real drained balance, but
+      // Gemini's documented error shapes for that case are a 429/403 with
+      // "billing"/"quota" language, distinct from an ordinary transient
+      // per-minute rate limit (which still has a "retry in Ns" hint).
+      const lowerError = error.toLowerCase();
+      const isBillingIssue = response.status === 403 || (response.status === 429 && lowerError.includes('billing'));
+      if (isBillingIssue) {
+        return new Response(
+          JSON.stringify({
+            error: "AI tagging is temporarily unavailable (Gemini quota/billing limit reached). Please try again later.",
+            billingIssue: true,
+          }),
+          { status: response.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
       if (response.status === 429) {
         const retryMatch = error.match(/retry in (\d+(?:\.\d+)?)s/i);

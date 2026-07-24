@@ -62,7 +62,18 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    // Moved to the paid key (2026-07-24) to get off the free tier's shared
+    // 20 req/day cap. The paid project's key can't call gemini-2.5-flash for
+    // text at all (live 404: "no longer available to new users" - a
+    // project-specific restriction, confirmed via a real call, not a general
+    // model deprecation), so the model changes along with the key. To revert
+    // this function to the free tier, change BOTH constants back:
+    // GEMINI_KEY_SECRET -> "GEMINI_API_KEY", GEMINI_MODEL -> "gemini-2.5-flash".
+    // See CLAUDE.md "Gemini API key routing".
+    const GEMINI_KEY_SECRET = "GEMINI_PAID_API_KEY";
+    const GEMINI_MODEL = "gemini-3.5-flash";
+    const geminiApiKey = Deno.env.get(GEMINI_KEY_SECRET);
+    console.log(`outfit-recommend: using Gemini key from secret "${GEMINI_KEY_SECRET}", model "${GEMINI_MODEL}"`);
 
     if (!geminiApiKey) {
       // Fallback to rule-based if no API key
@@ -192,7 +203,7 @@ Respond with ONLY a JSON array (no markdown, no explanation):
     console.log(`outfit-recommend: full prompt sent to Gemini:\n${prompt}`);
 
     const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`,      {
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${geminiApiKey}`,      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -208,7 +219,12 @@ Respond with ONLY a JSON array (no markdown, no explanation):
 
     if (!response.ok) {
       const error = await response.text();
-      console.error('Gemini API error:', error);
+      // Distinguished only for logging clarity - the client-facing behavior
+      // (silently fall back to rule-based) is unchanged either way, matching
+      // this function's existing "AI pass failing is never alarming, just use
+      // rule-based" design.
+      const isBillingIssue = response.status === 403 || (response.status === 429 && error.toLowerCase().includes('billing'));
+      console.error(`Gemini API error${isBillingIssue ? ' (billing/quota limit reached)' : ''}:`, error);
       return new Response(
         JSON.stringify({
           recommendations: generateRuleBasedOutfits(items, activityText),

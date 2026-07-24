@@ -109,7 +109,9 @@ export function AddItemPage() {
       });
 
       if (!response.ok) {
-        throw new Error('AI tagging failed');
+        const body = await response.json().catch(() => null);
+        setAiError(body?.billingIssue ? body.error : 'Could not auto-detect. Please tag manually.');
+        return;
       }
 
       const result = await response.json();
