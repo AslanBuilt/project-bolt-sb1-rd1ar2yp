@@ -8,9 +8,13 @@ const corsHeaders = {
 };
 
 const GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image";
+const GEMINI_TIMEOUT_MS = 60_000;
 
+// Scope deliberately locked to exactly top + bottom (2026-07-24) - shoes were
+// tried, worked, but were reverted for overall reliability. Not a "shoes
+// support" bug to fix later; see CLAUDE.md "Outfit try-on feature".
 interface StepInput {
-  category: string; // 'upper' | 'lower' | 'shoes'
+  category: "upper" | "lower";
   photoUrl: string;
   description?: string;
 }
@@ -49,61 +53,94 @@ async function fetchAsInlineImage(url: string, label: string): Promise<{ data: s
   return { data: btoa(binary), mimeType };
 }
 
+async function callGeminiImageGeneration(
+  parts: Record<string, unknown>[],
+  apiKey: string,
+  logPrefix: string
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+  try {
+    return await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+        }),
+        signal: controller.signal,
+      }
+    );
+  } catch (err) {
+    if ((err as Error)?.name === "AbortError") {
+      throw new Error(`GEMINI_TIMEOUT: no response within ${GEMINI_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function generateTryOnImage(
   basePhotoUrl: string,
-  steps: StepInput[],
+  upperStep: StepInput,
+  lowerStep: StepInput,
   apiKey: string,
   logPrefix: string
 ): Promise<Blob> {
   const baseImage = await fetchAsInlineImage(basePhotoUrl, "base photo");
   console.log(`${logPrefix} base photo fetched, mimeType=${baseImage.mimeType}`);
 
-  const garmentImages: { data: string; mimeType: string; category: string; description: string }[] = [];
-  for (const step of steps) {
-    const image = await fetchAsInlineImage(step.photoUrl, `${step.category} garment photo`);
-    const description = step.description?.trim() || step.category;
-    garmentImages.push({ ...image, category: step.category, description });
-    console.log(`${logPrefix} fetched ${step.category} garment: "${description}" mimeType=${image.mimeType}`);
-  }
+  const upperImage = await fetchAsInlineImage(upperStep.photoUrl, "upper garment photo");
+  const upperDescription = upperStep.description?.trim() || "top garment";
+  console.log(`${logPrefix} fetched upper garment: "${upperDescription}" mimeType=${upperImage.mimeType}`);
 
-  const garmentList = garmentImages
-    .map((g, i) => `image ${i + 2}: ${g.description} (${g.category} garment)`)
-    .join(", ");
+  const lowerImage = await fetchAsInlineImage(lowerStep.photoUrl, "lower garment photo");
+  const lowerDescription = lowerStep.description?.trim() || "bottom garment";
+  console.log(`${logPrefix} fetched lower garment: "${lowerDescription}" mimeType=${lowerImage.mimeType}`);
 
   const prompt =
-    `You are given a photo of a person (image 1) and ${garmentImages.length} garment reference photo(s): ${garmentList}. ` +
-    `Generate a new photorealistic image of the SAME person from image 1, in the same pose, framing, and background, ` +
-    `but now wearing all of the garments shown in the other reference images together as a single coordinated outfit. ` +
+    `You are given a photo of a person (image 1), a top garment (image 2: ${upperDescription}), ` +
+    `and a bottom garment (image 3: ${lowerDescription}). ` +
+    `Generate a new photorealistic image of the SAME person from image 1, in the same pose and background, ` +
+    `now wearing the top garment from image 2 and the bottom garment from image 3 together as a coordinated outfit. ` +
     `Preserve the person's face, identity, body shape, and the background exactly as in image 1. ` +
     `Match each garment's color, pattern, and style as closely as possible to its reference photo. ` +
-    `Do not crop, zoom in, or reframe the shot: keep the exact same full-body framing as image 1, with the person's entire body visible from head to feet, including their shoes/footwear fully in frame. ` +
-    `If a garment category (e.g. shoes) isn't included in the reference images, leave that part of the person's outfit unchanged from image 1.`;
+    `Leave everything else - including the person's existing shoes/footwear and any accessories - exactly as shown in image 1, unchanged. ` +
+    `Do not crop, zoom in, or reframe the shot: keep the exact same full-body framing as image 1, with the person's entire body visible from head to feet, including their shoes fully in frame.`;
 
   const parts: Record<string, unknown>[] = [
     { text: prompt },
     { inlineData: { mimeType: baseImage.mimeType, data: baseImage.data } },
-    ...garmentImages.map((g) => ({ inlineData: { mimeType: g.mimeType, data: g.data } })),
+    { inlineData: { mimeType: upperImage.mimeType, data: upperImage.data } },
+    { inlineData: { mimeType: lowerImage.mimeType, data: lowerImage.data } },
   ];
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
-      }),
-    }
-  );
+  let response: Response | null = null;
+  let lastErrorText = "";
+  const maxAttempts = 2; // one retry, specifically for Gemini's transient 503 "high demand" - not a general retry policy
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    response = await callGeminiImageGeneration(parts, apiKey, logPrefix);
+    if (response.ok) break;
 
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error(`${logPrefix} Gemini image API error (HTTP ${response.status}):`, errText.slice(0, 1000));
-    throw new Error(`GEMINI_HTTP_${response.status}: ${errText.slice(0, 300)}`);
+    lastErrorText = await response.text();
+    console.error(`${logPrefix} Gemini image API error (HTTP ${response.status}), attempt ${attempt}/${maxAttempts}:`, lastErrorText.slice(0, 1000));
+
+    if (response.status === 503 && attempt < maxAttempts) {
+      console.log(`${logPrefix} 503 (high demand) - retrying once after a short delay`);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      continue;
+    }
+    break;
   }
 
-  const result = await response.json();
+  if (!response!.ok) {
+    throw new Error(`GEMINI_HTTP_${response!.status}: ${lastErrorText.slice(0, 300)}`);
+  }
+
+  const result = await response!.json();
   const candidate = result?.candidates?.[0];
   console.log(`${logPrefix} Gemini response finishReason=${candidate?.finishReason}`);
 
@@ -129,8 +166,17 @@ Deno.serve(async (req: Request) => {
   try {
     const { userId, comboKey, basePhotoUrl, steps } = (await req.json()) as TryOnRequest;
 
-    if (!userId || !comboKey || !basePhotoUrl || !Array.isArray(steps) || steps.length === 0) {
+    if (!userId || !comboKey || !basePhotoUrl || !Array.isArray(steps)) {
       return json({ success: false, error: "Missing required fields" }, 400);
+    }
+
+    const upperStep = steps.find((s) => s.category === "upper");
+    const lowerStep = steps.find((s) => s.category === "lower");
+    if (steps.length !== 2 || !upperStep || !lowerStep) {
+      return json(
+        { success: false, error: "Expected exactly two garment steps: upper and lower" },
+        400
+      );
     }
 
     // Service-role client so the final result is written durably here,
@@ -141,24 +187,32 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    async function markResult(patch: { status: "done" | "failed"; image_url?: string }) {
-      const { error } = await supabaseAdmin
-        .from("tryon_results")
-        .upsert(
-          {
-            user_id: userId,
-            combo_key: comboKey,
-            status: patch.status,
-            image_url: patch.image_url ?? null,
-            failed_step: null,
-            skipped: [],
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "user_id,combo_key" }
-        );
-      if (error) {
-        console.error(`outfit-tryon[${comboKey}] failed to write tryon_results:`, error);
+    // Retries once on failure - a generated image that never gets marked
+    // "done" here is a real image, already paid for and already in storage,
+    // but the combo-key cache will never learn that, silently forcing a
+    // wasteful re-generation (or a stuck "generating" row) next time this
+    // combo is requested. One retry meaningfully reduces that risk for a
+    // one-off transient DB blip at effectively no extra cost.
+    async function markResult(patch: { status: "done" | "failed"; image_url?: string }): Promise<boolean> {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const { error } = await supabaseAdmin
+          .from("tryon_results")
+          .upsert(
+            {
+              user_id: userId,
+              combo_key: comboKey,
+              status: patch.status,
+              image_url: patch.image_url ?? null,
+              failed_step: null,
+              skipped: [],
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "user_id,combo_key" }
+          );
+        if (!error) return true;
+        console.error(`outfit-tryon[${comboKey}] failed to write tryon_results (attempt ${attempt}/2):`, error);
       }
+      return false;
     }
 
     // Image generation isn't available on Gemini's free tier at all, so this
@@ -179,7 +233,7 @@ Deno.serve(async (req: Request) => {
 
     let resultBlob: Blob;
     try {
-      resultBlob = await generateTryOnImage(basePhotoUrl, steps, apiKey, logPrefix);
+      resultBlob = await generateTryOnImage(basePhotoUrl, upperStep, lowerStep, apiKey, logPrefix);
     } catch (err) {
       const message = String((err as Error)?.message || err);
       console.error(`${logPrefix} generation failed:`, message);
@@ -200,13 +254,16 @@ Deno.serve(async (req: Request) => {
         lower.includes("quota") ||
         lower.includes("billing") ||
         lower.includes("resource_exhausted");
+      const isTimeout = message.includes("GEMINI_TIMEOUT");
 
       return json(
         {
           success: false,
           error: isBillingIssue
             ? "Try-on is temporarily unavailable (image generation quota/billing limit reached). Please try again later."
-            : "Try-on generation failed.",
+            : isTimeout
+              ? "Try-on generation timed out. Please try again."
+              : "Try-on generation failed.",
         },
         200
       );
@@ -225,7 +282,13 @@ Deno.serve(async (req: Request) => {
     }
 
     console.log(`${logPrefix} success: path=${path}`);
-    await markResult({ status: "done", image_url: path });
+    const persisted = await markResult({ status: "done", image_url: path });
+    if (!persisted) {
+      // The image is real and already in storage - still tell the client it
+      // succeeded (it did) - but this combo's cache row is now inconsistent
+      // and needs to be loud in logs since nothing else will ever surface it.
+      console.error(`${logPrefix} CRITICAL: image generated and stored at ${path}, but tryon_results could not be marked done after 2 attempts - this combo's cache is now stale`);
+    }
 
     return json({ success: true, path }, 200);
   } catch (err) {

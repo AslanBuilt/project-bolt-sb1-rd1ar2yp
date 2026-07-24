@@ -439,17 +439,19 @@ export function TodayPage() {
     setGenerating(false);
   };
 
-  // If both a base layer (shirts) and an outer layer (sweatshirt_jacket) are
-  // present, only the visible outer layer is sent for the "upper" step.
-  // Shoes are included too - unlike the old CatVTON/IDM-VTON chain, Gemini's
-  // image model isn't restricted to a single upper/lower cloth_type param.
+  // Scope deliberately locked to top + bottom only (2026-07-24). Shoes were
+  // tried (Gemini's image model isn't restricted to a fixed cloth_type param
+  // the way the old CatVTON/IDM-VTON chain was, so it worked), but were
+  // reverted as a deliberate reliability scope reduction - see CLAUDE.md
+  // "Outfit try-on feature". If both a base layer (shirts) and an outer layer
+  // (sweatshirt_jacket) are present, only the visible outer layer is sent for
+  // the "upper" step.
   const getTryOnStepItems = (outfitItems: ClothingItem[]): ClothingItem[] => {
     const upperItem =
       outfitItems.find(i => i.category === 'sweatshirt_jacket') ||
       outfitItems.find(i => i.category === 'shirts');
     const lowerItem = outfitItems.find(i => i.category === 'pants' || i.category === 'shorts');
-    const shoesItem = outfitItems.find(i => i.category === 'shoes');
-    return [upperItem, lowerItem, shoesItem].filter((i): i is ClothingItem => Boolean(i));
+    return [upperItem, lowerItem].filter((i): i is ClothingItem => Boolean(i));
   };
 
   const getComboKey = (stepItems: ClothingItem[]): string => stepItems.map(i => i.id).sort().join('-');
@@ -506,10 +508,7 @@ export function TodayPage() {
       const urlMap = await getSignedUrls(photoPaths);
 
       const steps = stepItems.map(i => ({
-        category:
-          i.category === 'sweatshirt_jacket' || i.category === 'shirts' ? 'upper'
-          : i.category === 'shoes' ? 'shoes'
-          : 'lower',
+        category: i.category === 'sweatshirt_jacket' || i.category === 'shirts' ? 'upper' : 'lower',
         photoUrl: urlMap.get(i.photo_url) || i.photo_url,
         description: `${i.primary_color} ${i.subcategory}`.trim(),
       }));
